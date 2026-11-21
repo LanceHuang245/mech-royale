@@ -2,7 +2,7 @@
 
 Survival-first fighter for the 16-mech battle royale:
 - map-aware line of sight and wall avoidance (rasterized building prisms + terrain)
-- loadout: arm gun + laser (both fire at range), never mortar (laser cook-off risk)
+- loadout goal: laser + lightning (gun as fallback), never mortar (laser cook-off risk)
 - leading gun aim, laser charge/release, lightning in its cone
 - seeks cover to break line of sight and regenerate when hurt, outnumbered or outranged
 - stays ahead of the zone, farms crates / NPC drones / cubes when no enemy is around
@@ -18,7 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,gunlaser").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
