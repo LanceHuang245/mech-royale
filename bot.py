@@ -1000,6 +1000,8 @@ class Bot:
         if mode == "fight":
             d = target["d"]
             pref = self._k("prefl", 110) if has_laser else (28 if has_light else 85)
+            if "brawl" in self.flags and has_light:
+                pref = 28  # lightning needs no aim: close to arc range even when also holding a laser
             if has_light and has_laser and d < 60:
                 pref = 28
             if finishing:
