@@ -20,7 +20,7 @@ import mechfight as mf
 TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:110,armgo,armd:100,pickd:240,pickd2:160,"
                                       "prefl:180,prefg:140,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
-                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,gunlaser").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -765,7 +765,7 @@ class Bot:
         picks_all = list(obs["pickups"]) + [{"id": i, "kind": k, "pos": pp} for i, (k, pp) in self.known_picks.items()
                                             if i not in seen_ids]
         # gunlaser: keep the arm gun and add a laser (both slots fire at once, both reach 230+ m)
-        want_kinds = ("laser",) if "gunlaser" in self.flags else WANT_KINDS
+        want_kinds = ("laser",) if "gunlaser" in self.flags else ("lightning",) if "gunlight" in self.flags else WANT_KINDS
         for p in picks_all:
             if p["kind"] not in want_kinds or p["kind"] in held:
                 continue
