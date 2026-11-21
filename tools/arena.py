@@ -189,6 +189,15 @@ class League(S.Sim):
         self.errors = 0
         self._kind = "gun"
         self.deaths_t = {}
+        # --- oracle switches (upper-bound experiments; a bot's flags o_* grant the mech a capability)
+        for m, bot in zip(self.mechs, self.bots):
+            fl = getattr(bot, "flags", set())
+            m.o_acc = 1.5 if "o_acc" in fl else 1.0      # hit boxes (bullets, laser) 1.5x wider
+            m.o_in = 0.7 if "o_dmgin" in fl else 1.0     # takes 30% less damage
+            m.o_out = 1.3 if "o_dmgout" in fl else 1.0   # deals 30% more damage
+            m.o_vis = "o_vis" in fl                      # 360 deg vision to 300 m, hearing x1.5 with half the noise
+            if "o_hp" in fl:
+                m.hp = m.max_hp = 1400.0 * 1.3
 
     # ---------------------------------------------------------------- sounds
     def _sound(self, kind, m):
@@ -207,9 +216,63 @@ class League(S.Sim):
         self._stat(m, "laser_shots")
         self._kind = "laser"
         try:
-            super().fire_laser(m, s, ev)
+            self._fire_laser_impl(m, s, ev)
         finally:
             self._kind = "gun"
+
+    def _fire_laser_impl(self, m, s, ev):
+        frac = s["min_frac"] + (1 - s["min_frac"]) * min(1.0, m.charge / s["charge"])
+        m.charge = 0.0
+        w = [x for x in m.weapons if x and x["kind"] == "laser"][0]
+        w["charge"], w["cooldown"] = 0.0, s["cooldown"]
+        yaw, pitch = m.aim
+        d = (math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch))
+        o = (m.pos[0], m.pos[1], m.pos[2] + 7)
+        best = None
+        for t in self.targets(m):
+            rel = [t.pos[0] - o[0], t.pos[1] - o[1]]
+            along = rel[0] * d[0] + rel[1] * d[1]
+            if along <= 0 or along > s["range"]:
+                continue
+            perp = abs(rel[0] * d[1] - rel[1] * d[0])
+            hz = o[2] + d[2] * along / max(1e-6, math.hypot(d[0], d[1]))
+            if perp < 2.5 * m.o_acc and t.pos[2] - 0.5 <= hz <= t.pos[2] + 9.5:
+                if self.w.los(o, (t.pos[0], t.pos[1], hz)) and (best is None or along < best[0]):
+                    best = (along, t)
+        if best:
+            self.damage(best[1], m, s["damage"] * frac, ev)
+
+    def step_bullets(self, ev):
+        keep = []
+        for b in self.bullets:
+            alive = True
+            shooter = self.mechs[b["by"]]
+            rad = 2.8 * shooter.o_acc
+            for _ in range(4):
+                o = list(b["pos"])
+                for i in range(3):
+                    b["pos"][i] += b["vel"][i] * DT / 4
+                b["left"] -= math.dist(o, b["pos"])
+                if b["left"] <= 0 or not self.w.los(o, b["pos"], 2.0):
+                    alive = False
+                    break
+                hit = None
+                for t in self.targets(shooter):
+                    px, py = t.pos[0], t.pos[1]
+                    sx, sy = b["pos"][0] - o[0], b["pos"][1] - o[1]
+                    L = sx * sx + sy * sy or 1e-9
+                    u = max(0.0, min(1.0, ((px - o[0]) * sx + (py - o[1]) * sy) / L))
+                    cx, cy, cz = o[0] + sx * u, o[1] + sy * u, o[2] + (b["pos"][2] - o[2]) * u
+                    if math.hypot(cx - px, cy - py) < rad and t.pos[2] - 0.3 <= cz <= t.pos[2] + 9.3:
+                        hit = t
+                        break
+                if hit:
+                    self.damage(hit, shooter, b["dmg"], ev)
+                    alive = False
+                    break
+            if alive:
+                keep.append(b)
+        self.bullets = keep
 
     def fire_lightning(self, m, s, ev):
         self._sound("lightning", m)
@@ -240,7 +303,7 @@ class League(S.Sim):
         self._stat(by, {"gun": "gun_hits", "laser": "laser_hits", "lightning": "light_hits"}[self._kind])
         self._stat(by, "dmg_out", amt)
         self._stat(t, "dmg_in", amt)
-        amt *= 1 + 0.04 * min(by.cubes, 10)
+        amt *= (1 + 0.04 * min(by.cubes, 10)) * by.o_out * t.o_in
         to_by = math.atan2(by.pos[1] - t.pos[1], by.pos[0] - t.pos[0])
         rear = abs(wrap(to_by - t.aim[0])) > math.pi / 2
         if rear:
@@ -285,9 +348,9 @@ class League(S.Sim):
                 continue
             d = math.dist(m.pos[:2], me.pos[:2])
             seen = False
-            if d <= 200:
+            if d <= (300 if me.o_vis else 200):
                 ok = True
-                if d > 45:
+                if d > 45 and not me.o_vis:
                     ang = math.atan2(m.pos[1] - me.pos[1], m.pos[0] - me.pos[0])
                     ok = abs(wrap(ang - me.aim[0])) <= math.radians(60)
                 if ok and self._los_cached(me, m, los_cache):
@@ -301,9 +364,9 @@ class League(S.Sim):
 
         def vis_point(p, near=45):
             d = math.dist(p[:2], me.pos[:2])
-            if d > 200:
+            if d > (300 if me.o_vis else 200):
                 return False
-            if d > near and abs(wrap(math.atan2(p[1] - me.pos[1], p[0] - me.pos[0]) - me.aim[0])) > math.radians(60):
+            if d > near and not me.o_vis and abs(wrap(math.atan2(p[1] - me.pos[1], p[0] - me.pos[0]) - me.aim[0])) > math.radians(60):
                 return False
             return self.w.los(eye, (p[0], p[1], p[2] + 1.0), 3.0)
 
@@ -318,12 +381,12 @@ class League(S.Sim):
                                   "vel": [round(v, 2) for v in b["vel"]]})
         sounds = []
         rng_tab = self.cfg["sound"]["range"]
-        sig = math.radians(self.cfg["sound"]["bearing_noise_deg"])
+        sig = math.radians(self.cfg["sound"]["bearing_noise_deg"]) * (0.5 if me.o_vis else 1.0)
         for kind, pos, src in self.snd_prev:
             if src == me.id:
                 continue
             d = math.dist(pos[:2], me.pos[:2])
-            if d <= rng_tab.get(kind, 100):
+            if d <= rng_tab.get(kind, 100) * (1.5 if me.o_vis else 1.0):
                 sounds.append({"kind": kind, "bearing": wrap(math.atan2(pos[1] - me.pos[1], pos[0] - me.pos[0]) + self.rng.gauss(0, sig)),
                                "dist": "near" if d < 60 else ("mid" if d < 160 else "far"), "age": 0.05})
         c, r, dps = self.zone_now()

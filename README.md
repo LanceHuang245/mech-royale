@@ -51,6 +51,23 @@ League = 16 bots in a free-for-all, which is what the qualifying round and final
 | `laser_tight` | not run | -0.25 (noise), accuracy unchanged | off |
 | A* navigation vs v0.3 | +0.4 (noise) | -0.14 +- 0.26 | kept (fixes a real stuck-in-pocket bug) |
 
+### Upper bounds ("oracle" switches in the league, paired, 120 matches each)
+
+A capability is granted for free to 4 of the 16 mechs (flags `o_acc`, `o_dmgin`, `o_dmgout`, `o_hp`, `o_vis`), so the
+gain shows how much engineering that capability could ever be worth in a free-for-all.
+
+| Granted capability | Gain over the base bot (points per match) |
+| --- | --- |
+| Damage taken -30% | **+1.65** (se 0.29) |
+| Max HP +30% | **+1.36** (se 0.28) |
+| 360 deg vision to 300 m, hearing x1.5 | +0.90 (se 0.29) |
+| Damage dealt +30% | +0.63 (se 0.34) |
+| Hit boxes 1.5x wider (gun hit rate ~44% -> ~65%) | +0.28 (se 0.27) |
+
+Survivability dominates; aiming improvements are worth almost nothing. The only large legitimate source of
+effective HP is the cube economy (cubes: +4% HP and damage each up to 10, plus upgrade offers), which these
+simulators do not model yet.
+
 ## Local testing (uv)
 
 The organizer's kit (`check/`, `arena/`, `protocol.md`) sits in the parent folder `../`.
