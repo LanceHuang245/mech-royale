@@ -773,6 +773,8 @@ class Bot:
                                             if i not in seen_ids]
         # gunlaser: keep the arm gun and add a laser (both slots fire at once, both reach 230+ m)
         want_kinds = ("laser",) if "gunlaser" in self.flags else ("lightning",) if "gunlight" in self.flags else WANT_KINDS
+        if "mortar" in self.flags and None in held and not (has_laser or has_light):
+            want_kinds = want_kinds + ("mortar",)  # mortar fills the empty slot until a laser/lightning turns up
         for p in picks_all:
             if p["kind"] not in want_kinds or p["kind"] in held:
                 continue
@@ -787,6 +789,9 @@ class Bot:
             p = want_pick[0]
             if None in held:
                 act["take"] = p["id"]
+            elif "mortar" in self.flags and "mortar" in held and p["kind"] != "mortar":
+                act["take"] = p["id"]
+                act["drop"] = held.index("mortar")  # a laser/lightning replaces the stopgap mortar, not the gun
             elif gi is not None and not (lw and lw.get("charge", 0) > 0):
                 act["take"] = p["id"]
                 act["drop"] = gi
@@ -909,6 +914,31 @@ class Bot:
                     half = math.radians(zs_.get("cone_deg", 30)) * 0.4
                     if abs(wrap(math.atan2(ctr[1] - y, ctr[0] - x) - cur_yaw)) < half:
                         fire[zi] = True
+            # mortar: low-arc ballistic shot with lead; kept beyond 40 m so our own splash never reaches us
+            mi, mw = self._wpn(me, "mortar")
+            if mw and kind == "mech" and 40 < d < 220 and (mw.get("cooldown", 0) or 0) <= 0.05 \
+                    and not (lw and (lw.get("charge", 0) or 0) > 0):
+                ms = mw["stats"]
+                v, g = ms.get("speed", 72.0), ms.get("gravity", 22.0)
+                oz = z + st.get("height", 9.0) + 0.5
+                tx, ty, tz = ctr[0], ctr[1], ctr[2] - 4.5 * shoot_at[4] / 2.5
+                theta = None
+                for _ in range(2):
+                    dh = math.hypot(tx - x, ty - y)
+                    dz = tz - oz
+                    disc = v ** 4 - g * (g * dh * dh + 2 * dz * v * v)
+                    if disc < 0 or dh < 1:
+                        theta = None
+                        break
+                    theta = math.atan((v * v - math.sqrt(disc)) / (g * dh))
+                    tof = dh / (v * math.cos(theta))
+                    tx, ty = ctr[0] + vel[0] * tof, ctr[1] + vel[1] * tof
+                if theta is not None:
+                    m_yaw = math.atan2(ty - y, tx - x)
+                    if not laser_ready:
+                        aim_yaw, aim_pitch = m_yaw, theta
+                    if abs(wrap(m_yaw - cur_yaw)) < 0.03 and abs(theta - cur_pitch) < 0.02:
+                        fire[mi] = True
         else:
             # no target: face threats / sounds / where we go
             look = None
