@@ -45,6 +45,19 @@ class Squad(A.League):
             raise _Done
         super().step_zone()
 
+    def damage(self, t, by, amt, ev):
+        # weapon damage upgrades (the league engine only applies plating / armor / nanites); gun_rate as +15% dps
+        u = getattr(by, "upg", None)
+        if u and not isinstance(by, A.Prop):
+            k = self._kind
+            if k == "laser":
+                amt *= 1.18 ** u.get("laser_damage", 0)
+            elif k == "gun":
+                amt *= 1.15 ** (u.get("gun_damage", 0) + u.get("gun_rate", 0))
+            elif k == "lightning":
+                amt *= 1.10 ** u.get("lightning_efficiency", 0)
+        super().damage(t, by, amt, ev)
+
     def targets(self, m):
         # house bots never fight each other (or farm): their shots only hit us
         if not isinstance(m, A.Prop) and m.id != 0:

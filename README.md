@@ -52,13 +52,16 @@ League = 16 bots in a free-for-all, which is what the qualifying round and final
 | `laser_tight` | not run | -0.25 (noise), accuracy unchanged | off |
 | A* navigation vs v0.3 | +0.4 (noise) | -0.14 +- 0.26 | kept (fixes a real stuck-in-pocket bug) |
 | `farm` (explore the safe circle for crates before 150 s) | `tools/practice.py`: +0.17 +- 0.28 (288 matches); **real 4.88 vs 4.75** | not run | **on** |
+| `many:2` (seek cover when 2 enemies see us, was 3) | `tools/practice.py`: +0.50 +- 0.33 (192) and +0.35 +- 0.20 (480, fresh seeds) | not run | **on** (default 2) |
 | `gunlaser` (keep the arm gun, add a laser, skip lightning) | `tools/practice.py`: +1.12 +- 0.41; +1.51 / +0.90 / +1.58 under three opponent models; **real 4.69 vs 4.88** | not run | off: the sim misjudges weapon choice |
 
 Tried in `tools/practice.py` (288 paired matches, se ~0.27) and removed: gun-only bots backing off laser snipers
 instead of charging (+0.00), longer loot runs while unarmed (+0.01), stronger low-HP focus (-0.17), lightning
 chain targeting (-0.09), dodging to the goal side (-0.02), wider cover search (24 dirs, 6 threats: -0.64).
 Dodging itself is worth about +0.4 (turning it off: -0.42). Also dropped: gun + lightning (-1.83), closing to
-28 m whenever lightning is held (+0.44, noise), a 2x wider gun aim window (+0.14, noise).
+28 m whenever lightning is held (+0.44, noise), a 2x wider gun aim window (+0.14, noise), damage upgrades first (-0.08), armor before plating (-0.03),
+earlier/later retreat (`hurt:0.55` +0.18, `hurt:0.25` +0.28, noise), `resume:0.95` (+0.16 with many:2),
+laser fighting distance 60 / 180 m (-0.20 / -0.28), cover only when hurt (`nocover` -0.33).
 
 Practice upper bounds (`tools/practice.py`, capability granted to our bot only, 192 matches each): damage taken
 -30% +2.58, damage dealt +30% +2.08, max HP +30% +1.18, 360 deg vision +1.05, start with 10 cubes +0.95, spawn

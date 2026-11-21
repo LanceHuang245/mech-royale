@@ -385,6 +385,13 @@ class Bot:
         """True once this decision has used more than `ms` milliseconds (hard budget is 50)."""
         return (time.perf_counter() - self.t0) * 1000.0 > ms
 
+    def _k(self, name, default):
+        """Numeric knob from a `name:value` flag (dev tuning), else the default."""
+        for f in self.flags:
+            if f.startswith(name + ":"):
+                return float(f[len(name) + 1:])
+        return default
+
     # --- helpers -------------------------------------------------------------------------------
     @staticmethod
     def _wpn(me, kind):
@@ -925,12 +932,15 @@ class Bot:
         mode = "roam"
         boost = False
         outranged = any("laser" in e["m"].get("weapons", []) and e["d"] > 70 for e in threats) and not has_laser
-        hurt = hp_frac < 0.38
-        if self.retreating and (hp_frac > 0.8 or (t - self.last_dmg_t > 12 and hp_frac > 0.6)):
+        hurt = hp_frac < self._k("hurt", 0.38)
+        if self.retreating and (hp_frac > self._k("resume", 0.8) or (t - self.last_dmg_t > 12 and hp_frac > 0.6)):
             self.retreating = False
         if hurt and threats:
             self.retreating = True
-        many = len(threats) >= 3 or (len(threats) >= 2 and hp_frac < 0.6) or dps_in > 110 or bool(hidden)
+        many = len(threats) >= self._k("many", 2) or (len(threats) >= 2 and hp_frac < 0.6) \
+            or dps_in > self._k("dps", 110) or bool(hidden)
+        if "nocover" in self.flags:  # only low HP sends us to cover, never numbers or range
+            many = outranged = False
         close_fight = (target is not None and target["shoot"] and target["d"] < 40 and (has_light or hp_frac > 0.5)) \
             or finishing
 
@@ -989,7 +999,7 @@ class Bot:
             self.mode = mode
         if mode == "fight":
             d = target["d"]
-            pref = 110 if has_laser else (28 if has_light else 85)
+            pref = self._k("prefl", 110) if has_laser else (28 if has_light else 85)
             if has_light and has_laser and d < 60:
                 pref = 28
             if finishing:
