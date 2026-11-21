@@ -13,6 +13,7 @@ Bot for the **Builders – Mech Royale** track of the Builders Buildathon: it pi
 | `tools/sim.py` | Rough local simulator (our bot vs 15 hunting stand-in bots) for smoke tests. Not the real game. |
 | `tools/diag.py` | Per-match diagnostics on the simulator (cause/time of death, stuck time, time per mode). |
 | `tools/arena.py`, `tools/league.py`, `tools/league_merge.py` | 16-bot free-for-all simulator: every mech runs a bot instance with protocol-level vision/sound. `league.py` fields several bot versions in the same matches (paired comparison) next to naive hunters and the kit example. |
+| `tools/practice.py` | Practice-style matches on the league engine (crates, NPC drones, cubes, upgrades, drops) against a 15-bot house squad modelled on the track page: shared vision, no infighting, weakest first (one hunter early, one more per house bot killed, all after `--late` 180 s); idle members shoot inside `--sight` 250 m. Default `--noise 2.5` is calibrated on two real scores: kit example ~0.9 (real 1.15), v0.5 ~5.0 (real 4.75); `patient` comes out -0.7 (real -0.5). |
 | `tools/trace.py` | Step-by-step trace of one simulated match (who hurts us, mode, position, goal). |
 | `tools/early.py` | Profile of the first minute of many matches (arming time, damage by attacker tier). |
 
@@ -50,6 +51,12 @@ League = 16 bots in a free-for-all, which is what the qualifying round and final
 | `early` (reach next circle sooner) | not run | -0.14 (noise) | off |
 | `laser_tight` | not run | -0.25 (noise), accuracy unchanged | off |
 | A* navigation vs v0.3 | +0.4 (noise) | -0.14 +- 0.26 | kept (fixes a real stuck-in-pocket bug) |
+| `farm` (explore the safe circle for crates before 150 s) | `tools/practice.py`: +0.17 +- 0.28 (288 matches) | not run | off; only candidate worth a real probe |
+
+Tried in `tools/practice.py` (288 paired matches, se ~0.27) and removed: gun-only bots backing off laser snipers
+instead of charging (+0.00), longer loot runs while unarmed (+0.01), stronger low-HP focus (-0.17), lightning
+chain targeting (-0.09), dodging to the goal side (-0.02), wider cover search (24 dirs, 6 threats: -0.64).
+Dodging itself is worth about +0.4 (turning it off: -0.42).
 
 ### Upper bounds ("oracle" switches in the league, paired, 120 matches each)
 

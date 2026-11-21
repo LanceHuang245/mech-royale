@@ -24,6 +24,9 @@ DT = 0.1  # one decision per 0.1 s
 NOISE_MULT = 5.0  # house-bot aim noise multiplier: with HUNT 1.0 and 3 lasers the kit example scores ~1.2 (real 1.15)
 LASER_BOTS = 3
 HUNT_MULT = 1.0  # scales how far house bots chase us
+SQUAD = False  # track-page squad model: one hunter early, more as we kill them, all after LATE seconds
+LATE = 240.0
+SIGHT = 45.0  # idle squad members still shoot at us inside this range
 
 
 def wrap(a):
@@ -40,6 +43,7 @@ class Mech:
         self.weapons = weapons  # list of dict or None
         self.alive = True
         self.last_dmg = -99.0
+        self.hit_by_me = -99.0
         self.last_spend = -99.0
         self.grounded = True
         self.charge = 0.0
@@ -223,6 +227,14 @@ class Sim:
             m.strafe_t = self.t + 1 + self.rng.random() * 2
         tier = {4.0: (150, 110), 2.5: (260, 140), 1.3: (420, 170), 0.7: (1e9, 200)}.get(m.skill, (300, 150))
         hunt_r, fire_r = tier[0] * HUNT_MULT, tier[1]
+        # practice squad: weakest first, one early, one more per house bot killed, all of them after LATE
+        provoked = True
+        if SQUAD:
+            house = [x for x in self.mechs[1:] if x.alive]
+            n = len(house) if self.t >= LATE else 1 + (15 - len(house))
+            active = m in house[:n]
+            hunt_r = 1e9 if active else 0.0
+            provoked = active or self.t - m.hit_by_me < 5 or d < SIGHT
         if math.dist(m.pos[:2], c) > r - 10 or d > hunt_r:
             mv = math.atan2(nc[1] - m.pos[1], nc[0] - m.pos[0])
             if math.dist(m.pos[:2], nc) < 40:
@@ -247,7 +259,7 @@ class Sim:
         yaw = math.atan2(py - m.pos[1], px - m.pos[0]) + self.rng.gauss(0, noise)
         pitch = math.atan2(tgt.pos[2] + 4.5 - m.pos[2] - 7, d) + self.rng.gauss(0, noise * 0.5)
         fire = [False, False]
-        if sees and d < 220:
+        if sees and d < 220 and provoked:
             fire[0] = abs(wrap(yaw - m.aim[0])) < 0.05
             if m.weapons[1] and m.weapons[1]["kind"] == "laser":
                 fire[1] = not (m.charge >= m.weapons[1]["stats"]["charge"] and abs(wrap(yaw - m.aim[0])) < 0.03)
@@ -426,6 +438,7 @@ class Sim:
         if t is self.me:
             ev.append({"type": "damaged", "amount": amt, "weapon": "gun", "bearing": to_by, "by": by.id, "rear": rear})
         if by is self.me:
+            t.hit_by_me = self.t
             ev.append({"type": "hit", "target": t.id, "amount": amt, "weapon": "gun"})
         if t.hp <= 0 and t.alive:
             t.alive = False
@@ -563,7 +576,12 @@ def main():
     ap.add_argument("--hunt", type=float, default=1.0)
     ap.add_argument("--botfile", default="")
     ap.add_argument("--start", type=int, default=0, help="seed offset (for parallel runs)")
+    ap.add_argument("--squad", action="store_true", help="practice squad activation (see SQUAD)")
+    ap.add_argument("--late", type=float, default=240.0)
+    ap.add_argument("--sight", type=float, default=45.0)
     args = ap.parse_args()
+    global SQUAD, LATE, SIGHT
+    SQUAD, LATE, SIGHT = args.squad, args.late, args.sight
     if args.botfile:
         import importlib.util
         spec = importlib.util.spec_from_file_location("botmod_alt", args.botfile)
