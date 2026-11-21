@@ -10,6 +10,7 @@ Survival-first fighter for the 16-mech battle royale:
 import math
 import os
 import random
+import heapq
 import sys
 import time
 from array import array
@@ -17,6 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "").split(",") if x)  # experiment switches (dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -187,6 +189,135 @@ class World:
 
 
 # ----------------------------------------------------------------------------------------------
+# Navigation grid + incremental A*
+# ----------------------------------------------------------------------------------------------
+NAV = 4.0
+_NB = [(1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+       (1, 1, 1.4142), (1, -1, 1.4142), (-1, 1, 1.4142), (-1, -1, 1.4142)]
+
+
+class Nav:
+    """Ground-level walkability grid (mech radius included) and A* over it."""
+
+    def __init__(self, world):
+        self.w = world
+        self.x0, self.y0 = world.bx0, world.by0
+        self.nx = int((world.bx1 - world.bx0) / NAV) + 1
+        self.ny = int((world.by1 - world.by0) / NAV) + 1
+        free = bytearray(self.nx * self.ny)
+        blocked, ground = world.blocked, world.ground
+        for j in range(self.ny):
+            y = self.y0 + (j + 0.5) * NAV
+            row = j * self.nx
+            for i in range(self.nx):
+                x = self.x0 + (i + 0.5) * NAV
+                g = ground(x, y)
+                if blocked(x, y, g, 0.0):
+                    continue
+                if (blocked(x + 2.5, y, g, 2.5) or blocked(x - 2.5, y, g, 2.5) or
+                        blocked(x, y + 2.5, g, 2.5) or blocked(x, y - 2.5, g, 2.5)):
+                    continue
+                free[row + i] = 1
+        self.free = free
+
+    def cell(self, x, y):
+        i = int((x - self.x0) / NAV)
+        j = int((y - self.y0) / NAV)
+        return (min(max(j, 0), self.ny - 1)) * self.nx + min(max(i, 0), self.nx - 1)
+
+    def center(self, c):
+        return (self.x0 + (c % self.nx + 0.5) * NAV, self.y0 + (c // self.nx + 0.5) * NAV)
+
+    def nearest_free(self, c, max_r=10):
+        if self.free[c]:
+            return c
+        ci, cj = c % self.nx, c // self.nx
+        for r in range(1, max_r + 1):
+            best, bd = None, 1e9
+            for dj in range(-r, r + 1):
+                for di in range(-r, r + 1):
+                    if max(abs(di), abs(dj)) != r:
+                        continue
+                    i, j = ci + di, cj + dj
+                    if 0 <= i < self.nx and 0 <= j < self.ny and self.free[j * self.nx + i]:
+                        d = di * di + dj * dj
+                        if d < bd:
+                            best, bd = j * self.nx + i, d
+            if best is not None:
+                return best
+        return None
+
+    def line_clear(self, x0, y0, x1, y1):
+        d = math.hypot(x1 - x0, y1 - y0)
+        n = int(d / 2.0) + 1
+        free = self.free
+        for k in range(n + 1):
+            f = k / n
+            if not free[self.cell(x0 + (x1 - x0) * f, y0 + (y1 - y0) * f)]:
+                return False
+        return True
+
+
+class Search:
+    """Incremental A* on the Nav grid: call step(deadline) until .done."""
+
+    def __init__(self, nav, start, goal):
+        self.nav, self.start, self.goal = nav, start, goal
+        self.gi, self.gj = goal % nav.nx, goal // nav.nx
+        self.g = {start: 0.0}
+        self.parent = {start: None}
+        self.open = [(0.0, 0.0, start)]
+        self.done = False
+        self.path = None
+        self.n = 0
+
+    def step(self, deadline):
+        nav = self.nav
+        nx, ny, free = nav.nx, nav.ny, nav.free
+        g_, parent, op = self.g, self.parent, self.open
+        gi, gj = self.gi, self.gj
+        while op:
+            if time.perf_counter() > deadline:
+                return
+            for _ in range(40):
+                if not op:
+                    break
+                f, g, c = heapq.heappop(op)
+                if g > g_.get(c, 1e18):
+                    continue
+                if c == self.goal:
+                    pts = []
+                    while c is not None:
+                        pts.append(nav.center(c))
+                        c = parent[c]
+                    pts.reverse()
+                    self.path = pts
+                    self.done = True
+                    return
+                self.n += 1
+                if self.n > 25000:
+                    self.done = True
+                    return
+                ci, cj = c % nx, c // nx
+                for di, dj, cost in _NB:
+                    ni, nj = ci + di, cj + dj
+                    if ni < 0 or nj < 0 or ni >= nx or nj >= ny:
+                        continue
+                    n = nj * nx + ni
+                    if not free[n]:
+                        continue
+                    if di and dj and not (free[cj * nx + ni] and free[nj * nx + ci]):
+                        continue
+                    ng = g + cost
+                    if ng < g_.get(n, 1e18):
+                        g_[n] = ng
+                        parent[n] = c
+                        hx, hy = abs(ni - gi), abs(nj - gj)
+                        heapq.heappush(op, (ng + hx + hy - 0.5858 * min(hx, hy), ng, n))
+        self.done = True  # open list exhausted: unreachable
+
+
+# ----------------------------------------------------------------------------------------------
 # Bot
 # ----------------------------------------------------------------------------------------------
 class Bot:
@@ -223,6 +354,24 @@ class Bot:
         self.tick_n = 0
         self.t0 = time.perf_counter()
         self.slow_ticks = 0
+        self.nav = None
+        if self.world.ok:
+            try:
+                tn = time.perf_counter()
+                self.nav = Nav(self.world)
+                log("nav built in %.2fs" % (time.perf_counter() - tn))
+            except Exception as e:  # keep playing with local steering only
+                log("nav failed:", repr(e))
+        self.path = None
+        self.path_goal = None
+        self.path_i = 0
+        self.search = None
+        self.search_goal = None
+        self.nav_cool = 0.0
+        self.force_replan = False
+        self.prog_pos = None
+        self.noprog = 0
+        self.boosting = False
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
@@ -390,6 +539,82 @@ class Bot:
         if strength <= 0 or n < 1e-6:
             return None
         return (ax / n, ay / n, strength, boost)
+
+    # --- navigation ----------------------------------------------------------------------------
+    def _drop_path(self):
+        self.path = None
+        self.path_goal = None
+        self.search = None
+
+    def _navigate(self, goal, pos, t):
+        """Return the point to steer towards: the goal itself, or the next waypoint of an A* route around obstacles."""
+        nav = self.nav
+        if goal is None or nav is None:
+            return goal
+        x, y, z = pos
+        if z > self.world.ground(x, y) + 3.0:
+            return goal  # on a roof or in the air: local steering only
+        gx, gy = goal[0], goal[1]
+        if math.hypot(gx - x, gy - y) < 8.0 or nav.line_clear(x, y, gx, gy):
+            self._drop_path()
+            return goal
+        gc = nav.cell(gx, gy)
+        if self.force_replan:
+            self._drop_path()
+            self.force_replan = False
+        if self.path is not None and self.path_goal is not None and \
+                abs(gc % nav.nx - self.path_goal % nav.nx) + abs(gc // nav.nx - self.path_goal // nav.nx) <= 4:
+            pass
+        elif self.search is not None and \
+                abs(gc % nav.nx - self.search_goal % nav.nx) + abs(gc // nav.nx - self.search_goal // nav.nx) <= 4:
+            pass
+        elif t >= self.nav_cool:
+            sc = nav.nearest_free(nav.cell(x, y))
+            ec = nav.nearest_free(gc)
+            self.path = None
+            if sc is None or ec is None:
+                self.nav_cool = t + 2.0
+                self.search = None
+            else:
+                self.search = Search(nav, sc, ec)
+                self.search_goal = gc
+        if self.search is not None and not self._late(20):
+            self.search.step(self.t0 + 0.026)
+            if self.search.done:
+                self.path = self.search.path
+                self.path_goal = self.search_goal
+                self.path_i = 0
+                if self.path is None:
+                    self.nav_cool = t + 2.0
+                self.search = None
+        if self.path:
+            return self._follow(pos)
+        return goal
+
+    def _follow(self, pos):
+        nav, path = self.nav, self.path
+        x, y = pos[0], pos[1]
+        n = len(path)
+        lo = max(0, self.path_i - 2)
+        hi = min(n - 1, self.path_i + 12)
+        bi, bd = lo, 1e18
+        for k in range(lo, hi + 1):
+            d = (path[k][0] - x) ** 2 + (path[k][1] - y) ** 2
+            if d < bd:
+                bi, bd = k, d
+        if bd > 28.0 ** 2:  # far off the route: plan again
+            self.force_replan = True
+            return path[min(bi + 1, n - 1)]
+        self.path_i = bi
+        target = path[min(bi + 1, n - 1)]
+        acc = 0.0
+        for k in range(bi + 1, n):
+            acc += math.hypot(path[k][0] - path[k - 1][0], path[k][1] - path[k - 1][1])
+            if acc > 32.0:
+                break
+            if nav.line_clear(x, y, path[k][0], path[k][1]):
+                target = path[k]
+        return target
 
     # --- steering ------------------------------------------------------------------------------
     def _steer(self, pos, goal_dir, t):
@@ -659,6 +884,7 @@ class Bot:
                          and target["d"] < 130 and hp_frac > 0.3 and len(real_threats) <= 2)
 
         # ---- movement decision
+        charge = False
         goal = None   # (x, y) point
         mode = "roam"
         boost = False
@@ -713,8 +939,13 @@ class Bot:
             if self.cover is not None and (self.cover_vis == 0 or not (target and target["shoot"])):
                 goal = self.cover[:2]
                 boost = (t - self.last_dmg_t < 2) and me["energy"] > 30
+            elif want_pick and not (has_laser or has_light) and want_pick[1] < 90 \
+                    and hp_frac > 0.3:
+                mode = "loot"  # no cover here: go and arm up instead of trading with a gun
             elif target and target["shoot"]:
                 mode = "fight"  # nowhere to hide: stand and trade
+                if outranged and hp_frac > 0.5 and len(real_threats) <= 1:
+                    charge = True
             else:
                 goal = None
             self.mode = mode
@@ -725,6 +956,9 @@ class Bot:
                 pref = 28
             if finishing:
                 pref = 28 if has_light else 55
+            if charge:
+                pref = 22
+                boost = d > 45 and me["energy"] > 35
             mp = target["m"]["pos"]
             ang = math.atan2(mp[1] - y, mp[0] - x)
             if t > self.strafe_until:
@@ -747,20 +981,47 @@ class Bot:
             if math.dist(goal, zs["nc"]) > zs["nr"]:
                 goal = zs["nc"]
 
+        # ---- progress watchdog (jitter in a pocket does not trip the speed-based stuck check)
+        if self.tick_n % 25 == 0:
+            if self.prog_pos is not None and goal is not None and mode in ("zone", "loot", "cube", "roam", "cover") \
+                    and math.dist(goal[:2], pos[:2]) > 20 and math.dist(pos[:2], self.prog_pos) < 5.0 \
+                    and t - self.last_dmg_t > 1.5:
+                self.force_replan = True
+                self.noprog += 1
+                if self.noprog >= 2 and me["energy"] > 35:
+                    self.climb_until = t + 2.5
+                    self.noprog = 0
+            else:
+                self.noprog = 0
+            self.prog_pos = (pos[0], pos[1])
+        nav_goal = self._navigate(goal, pos, t) if mode != "fight" else goal
+
         # ---- steering
         move = [0.0, 0.0]
+        goal_raw = goal
+        goal = nav_goal
         if goal is not None:
             gdx, gdy = goal[0] - x, goal[1] - y
             gd = math.hypot(gdx, gdy)
             if gd > 1.2:
                 gdx, gdy = gdx / gd, gdy / gd
                 dx, dy = self._steer(pos, (gdx, gdy), t)
-                speed = 1.0 if gd > 4 else max(0.3, gd / 4)
+                gd_final = math.hypot(goal_raw[0] - x, goal_raw[1] - y)
+                speed = 1.0 if gd_final > 4 else max(0.3, gd_final / 4)
                 move = [dx * speed, dy * speed]
                 self.prev_dir = (dx, dy)
                 # climbing onto roofs for loot
-                if mode == "loot" and gd < 14 and want_pick[0]["pos"][2] > z + 1.5 and me["energy"] > 20:
+                if mode == "loot" and gd_final < 14 and want_pick[0]["pos"][2] > z + 1.5 and me["energy"] > 20:
                     self.climb_until = max(self.climb_until, t + 0.6)
+                # hurry to far loot / cubes when nobody is close (boost drains energy, which regenerates)
+                if mode in ("loot", "cube") and gd_final > 30 and not any(e["d"] < 80 for e in real_threats):
+                    if self.boosting and me["energy"] > 22 or me["energy"] > 60:
+                        boost = True
+                        self.boosting = True
+                    else:
+                        self.boosting = False
+                else:
+                    self.boosting = False
 
         if dodge:
             dvx, dvy, dstr, dboost = dodge
@@ -814,6 +1075,7 @@ class Bot:
         act["fire"] = fire
         act["boost"] = bool(boost)
         act["jump"] = jump
+        self.dbg = {"pos": [round(x), round(y), round(z, 1)], "goal": [round(goal[0]), round(goal[1])] if goal else None, "mv": [round(move[0], 2), round(move[1], 2)], "vel": [round(me["vel"][0], 1), round(me["vel"][1], 1)], "en": round(me["energy"]), "clm": round(self.climb_until - t, 1), "thr": len(threats), "enm": len(enemies), "vis": [bool(e["vis"]) for e in enemies][:3], "outr": outranged, "many": many, "close": close_fight, "ret": self.retreating, "cov": self.cover_vis if self.cover else None}
         return act
 
     def _roam_goal(self, obs, pos, zs, farm, hp_frac, threats):

@@ -11,9 +11,11 @@ Bot for the **Builders – Mech Royale** track of the Builders Buildathon: it pi
 | `bot.py` | The bot logic (`Bot.act` is called once per observation). |
 | `mechfight.py` | Protocol wrapper (stdin/stdout loop, types, debug drawing). |
 | `tools/sim.py` | Rough local simulator (our bot vs 15 hunting stand-in bots) for smoke tests. Not the real game. |
-| `tools/diag.py` | Per-match diagnostics on the simulator (damage in/out, accuracy, time per mode). |
+| `tools/diag.py` | Per-match diagnostics on the simulator (cause/time of death, stuck time, time per mode). |
+| `tools/trace.py` | Step-by-step trace of one simulated match (who hurts us, mode, position, goal). |
+| `tools/early.py` | Profile of the first minute of many matches (arming time, damage by attacker tier). |
 
-## Strategy (v0.3)
+## Strategy (v0.4)
 
 - Map model: building prisms rasterized to a 2 m grid + terrain, used for line of sight and wall avoidance.
 - Loadout: laser + lightning (gun as fallback); mortar is never picked up (laser cook-off risk).
@@ -25,6 +27,10 @@ Bot for the **Builders – Mech Royale** track of the Builders Buildathon: it pi
 - Finish-off: low-HP targets (<30%) are chased and prioritised; a kill's dropped cubes are collected at once.
 - Incoming fire: sidestep charging-laser lines, dodge bullets about to hit and run from mortar landing points.
 - Memory: crates and weapon pickups seen earlier are remembered so the bot can return to them.
+- Navigation: a 4 m walkability grid (mech radius included) plus incremental A* routes around buildings;
+  a no-progress watchdog replans (or jets over the obstacle) when the bot jitters in a pocket.
+- Loot run: boost towards far weapons/cubes when nobody is close; with no cover and only the gun, go
+  arm up (or charge a laser sniper) instead of trading shots at range.
 - Time guard: every decision stops optional work after ~15-30 ms (hard limit is 50 ms on 1 CPU).
 
 ## Local testing (uv)

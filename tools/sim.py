@@ -179,8 +179,14 @@ class Sim:
                 mechs.append({"id": m.id, "kind": "mech", "pos": list(m.pos), "vel": list(m.vel), "aim": list(m.aim),
                               "hp": m.hp, "max_hp": m.max_hp, "cubes": 0,
                               "weapons": [w["kind"] for w in m.weapons if w], "charging": m.charge > 0})
-        pick = [p for p in self.pickups if math.dist(p["pos"][:2], me.pos[:2]) < 150 and
-                self.w.los((me.pos[0], me.pos[1], me.pos[2] + 8), (p["pos"][0], p["pos"][1], p["pos"][2] + 1))]
+        def pick_visible(p):
+            d = math.dist(p["pos"][:2], me.pos[:2])
+            if d > 200:
+                return False
+            if d > 45 and abs(wrap(math.atan2(p["pos"][1] - me.pos[1], p["pos"][0] - me.pos[0]) - me.aim[0])) > math.radians(60):
+                return False
+            return self.w.los((me.pos[0], me.pos[1], me.pos[2] + 8), (p["pos"][0], p["pos"][1], p["pos"][2] + 1))
+        pick = [p for p in self.pickups if pick_visible(p)]
         c, r, dps = self.zone_now()
         ss, se, _ = self.zone_info()
         st = dict(self.cfg["mech"])
