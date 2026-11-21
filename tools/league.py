@@ -69,7 +69,8 @@ def main():
             means[lab] = sum(pts) / len(pts)
         per_match.append(means)
         print(json.dumps({"seed": seed, "t": round(sim.t, 1), "means": {k2: round(v, 2) for k2, v in means.items()},
-                          "act_p99": max(r["act_p99"] for r in res), "act_max": max(r["act_max"] for r in res)}), flush=True)
+                          "act_p99": max(r["act_p99"] for r in res), "act_max": max(r["act_max"] for r in res),
+                          "cpu_p99": max(r["cpu_p99"] for r in res), "cpu_max": max(r["cpu_max"] for r in res)}), flush=True)
 
     print("COMBAT " + json.dumps(agg))
     n = len(per_match)
