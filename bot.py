@@ -18,7 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,hurt:0.55,resume:0.95").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,hurt:0.55,resume:0.95,armgo,armd:100").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -374,6 +374,7 @@ class Bot:
         self.boosting = False
         self.flags = set(FLAGS)  # strategy switches (tools/arena.py sets them per instance)
         self.hide_until = 0.0
+        self.wig_sign, self.wig_until = 1, 0.0
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
@@ -760,7 +761,7 @@ class Bot:
             if abs(p["pos"][2] - z) > 25:
                 continue
             d = math.dist(p["pos"][:2], pos[:2])
-            if d > (240 if not (has_laser or has_light) else 160) or not self._safe_point(zs, p["pos"]) and d > 30:
+            if d > (self._k("pickd", 240) if not (has_laser or has_light) else self._k("pickd2", 160)) or not self._safe_point(zs, p["pos"]) and d > 30:
                 continue
             if want_pick is None or d < want_pick[1]:
                 want_pick = (p, d)
@@ -808,7 +809,7 @@ class Bot:
                 d = math.dist(c["pos"][:2], pos[:2])
                 if d < 150 and c["pos"][2] < z + 6:
                     cands.append((d, "crate", c, (c["pos"][0], c["pos"][1], c["pos"][2] + 1.2)))
-            if hp_frac > 0.55:
+            if hp_frac > self._k("npchp", 0.55):
                 for n in npcs:
                     d = math.dist(n["pos"][:2], pos[:2])
                     if d < 140:
@@ -923,7 +924,7 @@ class Bot:
         want_cube = None
         for c in obs["cubes"]:
             d = math.dist(c["pos"][:2], pos[:2])
-            if d < 70 and abs(c["pos"][2] - z) < 4.0 and self._safe_point(zs, c["pos"]):
+            if d < self._k("cubed", 70) and abs(c["pos"][2] - z) < 4.0 and self._safe_point(zs, c["pos"]):
                 if want_cube is None or d < want_cube[0]:
                     want_cube = (d, c["pos"])
         real_threats = [e for e in threats if not e.get("pseudo")]
@@ -945,11 +946,15 @@ class Bot:
             or dps_in > self._k("dps", 110) or bool(hidden)
         if "nocover" in self.flags:  # only low HP sends us to cover, never numbers or range
             many = outranged = False
-        close_fight = (target is not None and target["shoot"] and target["d"] < 40 and (has_light or hp_frac > 0.5)) \
+        close_fight = (target is not None and target["shoot"] and target["d"] < self._k("closed", 40) and (has_light or hp_frac > 0.5)) \
             or finishing
 
         if zs["urgent"]:
             mode = "zone"
+        elif "armgo" in self.flags and want_pick and not (has_laser or has_light) \
+                and want_pick[1] < self._k("armd", 50) and hp_frac > 0.25:
+            mode = "loot"  # gun-only loses every fight: reach a weapon first, even under fire
+            boost = me["energy"] > 25 and want_pick[1] > 8
         elif (self.retreating or many or outranged or (hide and not zs["must_go"])) and not close_fight:
             mode = "cover"
         elif zs["must_go"]:
@@ -980,7 +985,9 @@ class Bot:
             keep = False
             if self.cover is not None and self.cover_vis == 0 and self.tick_n - self.cover_calc_tick < 40:
                 cp = self.cover
-                if math.dist(cp[:2], pos[:2]) > 1.5 and self.tick_n % 3 == 0:
+                # under fire the cover spot is re-checked every tick (a spot that no longer hides us is not cover)
+                if (math.dist(cp[:2], pos[:2]) > 1.5 and self.tick_n % 3 == 0) or \
+                        ("ccheck" in self.flags and t - self.last_dmg_t < 1.0):
                     keep = self._cover_vis(self._threat_eyes(th_list), (cp[0], cp[1], cp[2] + 7)) == 0
                 else:
                     keep = True
@@ -1003,13 +1010,13 @@ class Bot:
             self.mode = mode
         if mode == "fight":
             d = target["d"]
-            pref = self._k("prefl", 110) if has_laser else (28 if has_light else 85)
+            pref = self._k("prefl", 110) if has_laser else (28 if has_light else self._k("prefg", 85))
             if "brawl" in self.flags and has_light:
-                pref = 28  # lightning needs no aim: close to arc range even when also holding a laser
+                pref = self._k("prefz", 28)  # lightning needs no aim: close to arc range even when also holding a laser
             if has_light and has_laser and d < 60:
-                pref = 28
+                pref = self._k("prefz", 28)
             if finishing:
-                pref = 28 if has_light else 55
+                pref = self._k("prefz", 28) if has_light else 55
             if charge:
                 pref = 22
                 boost = d > 45 and me["energy"] > 35
@@ -1019,7 +1026,7 @@ class Bot:
                 self.strafe_sign = -self.strafe_sign if self.rng.random() < (1.0 if "jink" in self.flags else 0.7) else self.strafe_sign
                 self.strafe_until = t + ((0.35 + self.rng.random() * 0.55) if "jink" in self.flags else (1.0 + self.rng.random() * 1.6))
             radial = max(-1.0, min(1.0, (d - pref) / 30.0))
-            side = 0.85 * self.strafe_sign
+            side = self._k("strafe", 0.85) * self.strafe_sign
             mvx = math.cos(ang) * radial + math.cos(ang + math.pi / 2) * side
             mvy = math.sin(ang) * radial + math.sin(ang + math.pi / 2) * side
             goal = (x + mvx * 20, y + mvy * 20)
@@ -1093,6 +1100,20 @@ class Bot:
                 boost = boost or (dboost and me["grounded"])
                 self.prev_dir = (move[0], move[1])
 
+        # wiggle: never stand still with enemies around (hitscan lasers and led bullets punish a static target)
+        if "wiggle" in self.flags and math.hypot(move[0], move[1]) < 0.25 and not zs["urgent"] and enemies:
+            e0 = min(enemies, key=lambda e: e["d"])
+            if e0["d"] < self._k("wigd", 160):
+                if t > self.wig_until:
+                    self.wig_sign = -self.wig_sign
+                    self.wig_until = t + 0.5 + self.rng.random() * 0.9
+                wa = math.atan2(e0["m"]["pos"][1] - y, e0["m"]["pos"][0] - x) + math.pi / 2
+                wv = [math.cos(wa) * self.wig_sign, math.sin(wa) * self.wig_sign]
+                if self.world.blocked(x + wv[0] * 4.0, y + wv[1] * 4.0, z, 4.0):
+                    self.wig_sign = -self.wig_sign
+                    wv = [-wv[0], -wv[1]]
+                move = [wv[0] * 0.6, wv[1] * 0.6]
+
         # quiet movement: at or below step_speed (5 m/s) a mech makes no sound at all
         if "sneak" in self.flags and mode in ("roam", "cube", "hold", "cover") and not boost and dodge is None \
                 and not zs["must_go"] and not zs["urgent"] and t - self.last_dmg_t > 3.0 \
@@ -1156,7 +1177,8 @@ class Bot:
         if not threats and hp_frac > 0.45:
             for dr in obs.get("drops", []):
                 d = math.dist(dr["pos"][:2], pos[:2])
-                if d < 170 and dr.get("lands_in", 99) < d / 11.7 + 8 and self._safe_point(zs, dr["pos"]):
+                # dropd: how far we travel for a supply drop (3 cubes + full HP/energy)
+                if d < self._k("dropd", 170) and dr.get("lands_in", 99) < d / 11.7 + 8 and self._safe_point(zs, dr["pos"]):
                     if dr.get("holder") not in (None, obs["self"]["id"]) and dr.get("progress", 0) > 1.5:
                         continue
                     return dr["pos"][:2]
@@ -1177,7 +1199,7 @@ class Bot:
                 return bc[1][:2]
         nc, nr = zs["nc"], zs["nr"]
         # farm: early on (one hunter at a time) explore the safe circle for crates instead of idling at its centre
-        if "farm" in self.flags and obs["t"] < 150 and not threats and not zs["must_go"]:
+        if "farm" in self.flags and obs["t"] < self._k("farmt", 150) and not threats and not zs["must_go"]:
             wp = self.explore_wp
             if wp is None or math.dist(wp, pos[:2]) < 15 or obs["t"] > self.explore_until or not self._safe_point(zs, wp):
                 a = self.rng.random() * TAU
