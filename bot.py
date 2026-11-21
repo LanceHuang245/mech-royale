@@ -18,13 +18,19 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,hurt:0.55,resume:0.95,armgo,armd:100,prefl:180,prefg:140,rim").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,hurt:0.55,resume:0.95,armgo,armd:100,prefl:180,prefg:140,rim,npcrush,upgdmg,restkill").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
     "laser_charge", "gun_damage", "capacitor", "reactor", "gyros", "lightning_range",
     "gun_mag", "sensors", "gun_velocity", "servos", "jets", "lightning_chain", "laser_pierce",
     "mortar_reload", "mortar_velocity", "mortar_splash",
+]
+# upgdmg: plating/armor first, then kill speed
+UPGRADE_DMG = [
+    "plating", "armor", "laser_damage", "gun_rate", "gun_damage", "lightning_efficiency", "laser_charge",
+    "nanites", "capacitor", "reactor", "gyros", "lightning_range", "lightning_chain", "gun_mag", "gun_velocity",
+    "sensors", "servos", "jets", "laser_pierce", "mortar_reload", "mortar_velocity", "mortar_splash",
 ]
 SOUND_THREAT = {"gun", "laser", "laser_charge", "lightning", "mortar", "step", "boost", "jet", "reload"}
 
@@ -405,7 +411,8 @@ class Bot:
         best, best_rank = 0, 1e9
         for i, ch in enumerate(offer["choices"]):
             cid = ch.get("id", "")
-            rank = UPGRADE_PRIORITY.index(cid) if cid in UPGRADE_PRIORITY else 50
+            prio = UPGRADE_DMG if "upgdmg" in self.flags else UPGRADE_PRIORITY
+            rank = prio.index(cid) if cid in prio else 50
             if rank < best_rank:
                 best, best_rank = i, rank
         return best
@@ -697,6 +704,8 @@ class Bot:
                 self.dmg_log.append((t, e.get("amount", 0), e["by"], e.get("bearing"), bool(e.get("rear"))))
             elif e["type"] == "kill":
                 self.last_kill_t = t
+                if "restkill" in self.flags and me["hp"] < self._k("restk", 0.8) * me["max_hp"]:
+                    self.retreating = True
             elif e["type"] in ("took", "take_failed"):
                 self.known_picks.pop(e.get("id"), None)
         self.dmg_log = [d for d in self.dmg_log if t - d[0] < 2.5]
@@ -809,11 +818,12 @@ class Bot:
                 d = math.dist(c["pos"][:2], pos[:2])
                 if d < 150 and c["pos"][2] < z + 6:
                     cands.append((d, "crate", c, (c["pos"][0], c["pos"][1], c["pos"][2] + 1.2)))
-            if hp_frac > self._k("npchp", 0.55):
+            if hp_frac > self._k("npchp", 0.35 if "npcrush" in self.flags else 0.55):
                 for n in npcs:
                     d = math.dist(n["pos"][:2], pos[:2])
-                    if d < 140:
-                        cands.append((d + 30, "npc", n, (n["pos"][0], n["pos"][1], n["pos"][2] + 1.75)))
+                    rush = "npcrush" in self.flags and t < self._k("npct", 120)
+                    if d < (220 if rush else 140):
+                        cands.append((d + (-40 if rush else 30), "npc", n, (n["pos"][0], n["pos"][1], n["pos"][2] + 1.75)))
             cands.sort(key=lambda c: c[0])
             for c in cands[:4]:
                 if self.world.los((x, y, z + muzzle_h), c[3]) and self._safe_point(zs, c[2]["pos"]):
@@ -1216,6 +1226,8 @@ class Bot:
             if wp is None or math.dist(wp, pos[:2]) < 15 or obs["t"] > self.explore_until or not self._safe_point(zs, wp):
                 a = self.rng.random() * TAU
                 rr = max(nr - zs["margin"], 10.0) * math.sqrt(self.rng.random())
+                if "rimfarm" in self.flags:  # explore the outer ring of the safe circle, away from the crowded middle
+                    rr = max(nr - zs["margin"], 10.0) * (0.6 + 0.4 * self.rng.random())
                 wp = (nc[0] + math.cos(a) * rr, nc[1] + math.sin(a) * rr)
                 self.explore_wp, self.explore_until = wp, obs["t"] + 25.0
             return wp
