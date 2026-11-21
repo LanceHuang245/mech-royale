@@ -18,7 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,hurt:0.55,resume:0.95,armgo,armd:100").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,hurt:0.55,resume:0.95,armgo,armd:100,prefl:180,prefg:140").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
