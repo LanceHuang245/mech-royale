@@ -11,6 +11,7 @@ import math
 import os
 import random
 import sys
+import time
 from array import array
 
 import mechfight as mf
@@ -220,6 +221,17 @@ class Bot:
         self.dmg_log = []  # (t, amount, by, bearing, rear)
         self.mode = "roam"
         self.tick_n = 0
+        self.t0 = time.perf_counter()
+        self.slow_ticks = 0
+        self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
+        self.known_picks = {}    # id -> (kind, pos)
+        self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
+        self.last_kill_t = -99.0
+        self.mortar_g = cfg["weapons"]["mortar"].get("gravity", 22.0)
+
+    def _late(self, ms):
+        """True once this decision has used more than `ms` milliseconds (hard budget is 50)."""
+        return (time.perf_counter() - self.t0) * 1000.0 > ms
 
     # --- helpers -------------------------------------------------------------------------------
     @staticmethod
@@ -264,6 +276,121 @@ class Bot:
         return math.dist(p[:2], zs["nc"]) <= max(zs["nr"] - zs["margin"] * 0.5, 3.0) or \
             (not zs["must_go"] and math.dist(p[:2], zs["c"]) <= zs["r"] - 25)
 
+    # --- memory --------------------------------------------------------------------------------
+    def _update_memory(self, obs, pos, eye):
+        w = self.world
+        cur_c = {c["id"]: c for c in obs["crates"]}
+        for cid, c in cur_c.items():
+            self.known_crates[cid] = c["pos"]
+        for cid in list(self.known_crates):
+            if cid in cur_c:
+                continue
+            p = self.known_crates[cid]
+            if math.dist(p[:2], pos[:2]) < 28 and abs(p[2] - pos[2]) < 14 and w.los(eye, (p[0], p[1], p[2] + 1.2)):
+                del self.known_crates[cid]
+        cur_p = {p["id"]: p for p in obs["pickups"]}
+        for pid, p in cur_p.items():
+            self.known_picks[pid] = (p["kind"], p["pos"])
+        for pid in list(self.known_picks):
+            if pid in cur_p:
+                continue
+            kind, p = self.known_picks[pid]
+            if math.dist(p[:2], pos[:2]) < 28 and abs(p[2] - pos[2]) < 14 and w.los(eye, (p[0], p[1], p[2] + 1.0)):
+                del self.known_picks[pid]
+
+    # --- incoming fire -------------------------------------------------------------------------
+    def _dodge(self, obs, me, enemies, t, can_zap):
+        """Sidestep laser lines, bullets and mortar shells. Returns (vx, vy, strength, boost) or None."""
+        x, y, z = me["pos"]
+        cx, cy, cz = x, y, z + 4.5
+        ax = ay = 0.0
+        strength = 0.0
+        boost = False
+        # 1) charging lasers aimed near us
+        for e in enemies:
+            m = e["m"]
+            if not m.get("charging") or not e["vis"]:
+                continue
+            d = e["d"]
+            if d > 290 or d < 5:
+                continue
+            if can_zap and d < 40:
+                continue  # lightning shorts the laser: shoot instead of running
+            yaw = m["aim"][0]
+            dx, dy = math.cos(yaw), math.sin(yaw)
+            rx, ry = x - m["pos"][0], y - m["pos"][1]
+            along = rx * dx + ry * dy
+            if along <= 0:
+                continue
+            cross = dx * ry - dy * rx
+            if abs(cross) > 7.0 + 0.03 * along:
+                continue
+            side = self.dodge_side.get(m["id"])
+            if side is None:
+                side = 1 if cross > 0.4 else (-1 if cross < -0.4 else self.strafe_sign)
+                self.dodge_side[m["id"]] = side
+            ax += -dy * side
+            ay += dx * side
+            strength = max(strength, 0.9)
+            boost = boost or me["energy"] > 30
+        for k in list(self.dodge_side):
+            if not any(e["m"]["id"] == k and e["m"].get("charging") for e in enemies):
+                del self.dodge_side[k]
+        # 2) bullets about to arrive / mortar shells about to land
+        for pr in obs["projectiles"]:
+            kind = pr.get("kind")
+            px, py, pz = pr["pos"]
+            vx, vy, vz = pr["vel"]
+            if kind == "gun":
+                sp2 = vx * vx + vy * vy + vz * vz
+                if sp2 < 1.0:
+                    continue
+                rx, ry, rz = px - cx, py - cy, pz - cz
+                tc = -(rx * vx + ry * vy + rz * vz) / sp2
+                if tc <= 0.02 or tc > 0.45:
+                    continue
+                mx_, my_, mz_ = rx + vx * tc, ry + vy * tc, rz + vz * tc
+                if mx_ * mx_ + my_ * my_ + mz_ * mz_ > 3.8 * 3.8:
+                    continue
+                hs = math.hypot(vx, vy) or 1.0
+                nx, ny = -vy / hs, vx / hs
+                side = 1.0 if (nx * (x - px) + ny * (y - py)) >= 0 else -1.0
+                ax += nx * side * 0.6
+                ay += ny * side * 0.6
+                strength = max(strength, 0.5)
+            elif kind == "mortar":
+                g = self.mortar_g
+                wx, wy, wz, tt = px, py, pz, 0.0
+                landed = False
+                while tt < 6.0:
+                    wx += vx * 0.1
+                    wy += vy * 0.1
+                    vz -= g * 0.1
+                    wz += vz * 0.1
+                    tt += 0.1
+                    if wz <= self.world.obstacle_top(wx, wy) + 0.3:
+                        landed = True
+                        break
+                if not landed or tt > 3.5:
+                    continue
+                dd = math.hypot(wx - x, wy - y)
+                if dd > 13.0:
+                    continue
+                if dd < 0.5:
+                    ux, uy = -vy, vx
+                    n = math.hypot(ux, uy) or 1.0
+                    ux, uy = ux / n, uy / n
+                else:
+                    ux, uy = (x - wx) / dd, (y - wy) / dd
+                ax += ux * 2.0
+                ay += uy * 2.0
+                strength = max(strength, 1.0)
+                boost = boost or (tt < 1.2 and dd < 9.0 and me["energy"] > 20)
+        n = math.hypot(ax, ay)
+        if strength <= 0 or n < 1e-6:
+            return None
+        return (ax / n, ay / n, strength, boost)
+
     # --- steering ------------------------------------------------------------------------------
     def _steer(self, pos, goal_dir, t):
         """Pick a walkable direction close to goal_dir. Returns (dx, dy)."""
@@ -289,6 +416,7 @@ class Bot:
     # --- main ----------------------------------------------------------------------------------
     def act(self, obs):
         self.tick_n += 1
+        self.t0 = time.perf_counter()
         t = obs["t"]
         me = obs["self"]
         pos = me["pos"]
@@ -306,6 +434,10 @@ class Bot:
                 self.last_dmg_bearing = e.get("bearing")
                 self.attackers[e["by"]] = t
                 self.dmg_log.append((t, e.get("amount", 0), e["by"], e.get("bearing"), bool(e.get("rear"))))
+            elif e["type"] == "kill":
+                self.last_kill_t = t
+            elif e["type"] in ("took", "take_failed"):
+                self.known_picks.pop(e.get("id"), None)
         self.dmg_log = [d for d in self.dmg_log if t - d[0] < 2.5]
         dps_in = sum(d[1] for d in self.dmg_log) / 2.5
         for s in obs["sounds"]:
@@ -316,6 +448,7 @@ class Bot:
             act["pick"] = self._upgrade_pick(obs["offer"])
 
         zs = self._zone_state(obs, pos)
+        self._update_memory(obs, pos, eye)
 
         # ---- enemies
         enemies = []
@@ -326,8 +459,11 @@ class Bot:
             d = math.dist(mp[:2], pos[:2])
             scale = 1 + 0.05 * m.get("cubes", 0)
             center = (mp[0], mp[1], mp[2] + 4.5 * scale)
-            vis = self.world.los(eye, (mp[0], mp[1], mp[2] + 8 * scale)) if d < 300 else False
-            shoot = vis or self.world.los((x, y, z + muzzle_h), center)
+            if d < 300 and not (d > 60 and self._late(15)):
+                vis = self.world.los(eye, (mp[0], mp[1], mp[2] + 8 * scale))
+                shoot = vis or self.world.los((x, y, z + muzzle_h), center)
+            else:
+                vis = shoot = False
             enemies.append({"m": m, "d": d, "vis": vis, "shoot": shoot, "center": center, "scale": scale})
         threats = [e for e in enemies if e["vis"] and e["d"] < 240]
         npcs = [m for m in obs["mechs"] if m["kind"] == "npc"]
@@ -353,7 +489,10 @@ class Bot:
 
         # ---- pickups we want
         want_pick = None
-        for p in obs["pickups"]:
+        seen_ids = {p["id"] for p in obs["pickups"]}
+        picks_all = list(obs["pickups"]) + [{"id": i, "kind": k, "pos": pp} for i, (k, pp) in self.known_picks.items()
+                                            if i not in seen_ids]
+        for p in picks_all:
             if p["kind"] not in WANT_KINDS or p["kind"] in held:
                 continue
             if abs(p["pos"][2] - z) > 25:
@@ -380,6 +519,8 @@ class Bot:
         for e in enemies:
             m = e["m"]
             s = e["d"] + 0.2 * m["hp"]
+            if m["hp"] <= 0.3 * m["max_hp"]:
+                s -= 100
             if not e["shoot"]:
                 s += 400
             if m["id"] == self.target_id:
@@ -503,6 +644,20 @@ class Bot:
                 # keep the charge while someone is tracked (it auto-fires after hold_s anyway)
                 fire[li] = bool(enemies) and (lw.get("charge", 0) or 0) < lw["stats"].get("charge", 0.75) + 1.5
 
+        # ---- incoming fire
+        dodge = self._dodge(obs, me, enemies, t, bool(zw) and me["energy"] > 6)
+
+        # ---- cubes in sight (kills drop theirs + 2)
+        want_cube = None
+        for c in obs["cubes"]:
+            d = math.dist(c["pos"][:2], pos[:2])
+            if d < 70 and abs(c["pos"][2] - z) < 4.0 and self._safe_point(zs, c["pos"]):
+                if want_cube is None or d < want_cube[0]:
+                    want_cube = (d, c["pos"])
+        real_threats = [e for e in threats if not e.get("pseudo")]
+        finishing = bool(target and target["shoot"] and target["m"]["hp"] <= 0.3 * target["m"]["max_hp"]
+                         and target["d"] < 130 and hp_frac > 0.3 and len(real_threats) <= 2)
+
         # ---- movement decision
         goal = None   # (x, y) point
         mode = "roam"
@@ -514,7 +669,8 @@ class Bot:
         if hurt and threats:
             self.retreating = True
         many = len(threats) >= 3 or (len(threats) >= 2 and hp_frac < 0.6) or dps_in > 110 or bool(hidden)
-        close_fight = target is not None and target["shoot"] and target["d"] < 40 and (has_light or hp_frac > 0.5)
+        close_fight = (target is not None and target["shoot"] and target["d"] < 40 and (has_light or hp_frac > 0.5)) \
+            or finishing
 
         if zs["urgent"]:
             mode = "zone"
@@ -522,6 +678,9 @@ class Bot:
             mode = "cover"
         elif zs["must_go"]:
             mode = "zone"
+        elif want_cube and hp_frac > 0.35 and (want_cube[0] < 10 or target is None or not target["shoot"]
+                                               or target["d"] > 60) and len(real_threats) <= 1:
+            mode = "cube"
         elif want_pick and not (has_laser or has_light) and t - self.last_dmg_t > 1.5 and \
                 (target is None or target["d"] > 50 or want_pick[1] < 20):
             mode = "loot"  # arm up before taking fights with the gun alone
@@ -564,6 +723,8 @@ class Bot:
             pref = 110 if has_laser else (28 if has_light else 85)
             if has_light and has_laser and d < 60:
                 pref = 28
+            if finishing:
+                pref = 28 if has_light else 55
             mp = target["m"]["pos"]
             ang = math.atan2(mp[1] - y, mp[0] - x)
             if t > self.strafe_until:
@@ -576,6 +737,8 @@ class Bot:
             goal = (x + mvx * 20, y + mvy * 20)
         elif mode == "loot":
             goal = want_pick[0]["pos"][:2]
+        elif mode == "cube":
+            goal = want_cube[1][:2]
         if mode in ("roam", "fight") and goal is None or mode == "roam":
             goal = self._roam_goal(obs, pos, zs, farm, hp_frac, threats)
 
@@ -598,6 +761,22 @@ class Bot:
                 # climbing onto roofs for loot
                 if mode == "loot" and gd < 14 and want_pick[0]["pos"][2] > z + 1.5 and me["energy"] > 20:
                     self.climb_until = max(self.climb_until, t + 0.6)
+
+        if dodge:
+            dvx, dvy, dstr, dboost = dodge
+            if zs["urgent"]:
+                dstr *= 0.5
+            if self.world.blocked(x + dvx * 4.0, y + dvy * 4.0, z, 4.0):
+                dvx, dvy = -dvx, -dvy
+                if self.world.blocked(x + dvx * 4.0, y + dvy * 4.0, z, 4.0):
+                    dstr = 0.0
+            if dstr > 0:
+                mx_ = dvx * dstr + move[0] * (1 - dstr)
+                my_ = dvy * dstr + move[1] * (1 - dstr)
+                n = math.hypot(mx_, my_) or 1.0
+                move = [mx_ / n, my_ / n]
+                boost = boost or (dboost and me["grounded"])
+                self.prev_dir = (move[0], move[1])
 
         # stuck detection
         hs = math.hypot(me["vel"][0], me["vel"][1])
@@ -662,6 +841,15 @@ class Bot:
             if d > stand:
                 return obj["pos"][:2]
             return None
+        # remembered crates (cube + 50% weapon each)
+        if hp_frac > 0.6 and not threats and self.known_crates:
+            bc = None
+            for cid, cp in self.known_crates.items():
+                d = math.dist(cp[:2], pos[:2])
+                if d < 260 and cp[2] < z + 8 and self._safe_point(zs, cp) and (bc is None or d < bc[0]):
+                    bc = (d, cp)
+            if bc and bc[0] > 20:
+                return bc[1][:2]
         # drift toward the next zone centre, settle inside it
         nc, nr = zs["nc"], zs["nr"]
         dn = math.dist(pos[:2], nc)
@@ -684,7 +872,11 @@ class Bot:
             a = k * TAU / 16
             ca, sa = math.cos(a), math.sin(a)
             prev_s = 0.0
+            if self._late(28) and best is not None:
+                break
             for dist in (7.0, 14.0, 22.0, 32.0, 44.0, 58.0, 75.0):
+                if self._late(33) and best is not None:
+                    break
                 ok = True
                 s = prev_s + 3.5
                 while s <= dist:

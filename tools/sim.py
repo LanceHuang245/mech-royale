@@ -21,8 +21,9 @@ sys.path.insert(0, os.path.dirname(HERE))
 import bot as B  # noqa: E402
 
 DT = 0.1  # one decision per 0.1 s
-NOISE_MULT = 1.0  # house-bot aim noise multiplier (tuned so the kit example lands near its real 1.15)
-LASER_BOTS = 7
+NOISE_MULT = 5.0  # house-bot aim noise multiplier: with HUNT 1.0 and 3 lasers the kit example scores ~1.2 (real 1.15)
+LASER_BOTS = 3
+HUNT_MULT = 1.0  # scales how far house bots chase us
 
 
 def wrap(a):
@@ -80,6 +81,8 @@ class Sim:
             p = self._open_point(self.z_center, self.z_radius * 0.9)
             self.pickups.append({"id": 8000 + k, "kind": self.rng.choice(["mortar", "laser", "lightning"]), "pos": p})
         self.bullets = []
+        self.cubes = []  # {"id","pos"}
+        self.me.cubes = 0
         self.deaths = []  # (t, id)
         hello = {"type": "hello", "protocol": "mechfight/1", "slot": 0, "seed": seed,
                  "map": {"dir": "", "files": []}, "config": cfg}
@@ -181,13 +184,19 @@ class Sim:
         c, r, dps = self.zone_now()
         ss, se, _ = self.zone_info()
         st = dict(self.cfg["mech"])
+        eye = (me.pos[0], me.pos[1], me.pos[2] + 8)
+        projs = []
+        for b in self.bullets:
+            if b["by"] != 0 and math.dist(b["pos"][:2], me.pos[:2]) < 150 and self.w.los(eye, b["pos"], 5.0):
+                projs.append({"id": 1, "kind": "gun", "pos": [round(v, 2) for v in b["pos"]], "vel": [round(v, 2) for v in b["vel"]]})
+        cubes = [dict(c) for c in self.cubes if math.dist(c["pos"][:2], me.pos[:2]) < 100 and self.w.los(eye, (c["pos"][0], c["pos"][1], c["pos"][2] + 1), 5.0)]
         return {"type": "obs", "tick": int(round(self.t * 20)), "t": round(self.t, 2),
                 "alive": sum(m.alive for m in self.mechs),
                 "self": {"id": 0, "pos": list(me.pos), "vel": list(me.vel), "aim": list(me.aim), "hp": me.hp,
-                         "max_hp": me.max_hp, "energy": me.energy, "max_energy": 100, "grounded": me.grounded,
-                         "cubes": 0, "upgrades": [], "in_zone": math.dist(me.pos[:2], c) <= r,
+                         "max_hp": round(me.max_hp, 1), "energy": me.energy, "max_energy": 100, "grounded": me.grounded,
+                         "cubes": me.cubes, "upgrades": [], "in_zone": math.dist(me.pos[:2], c) <= r,
                          "weapons": copy.deepcopy(me.weapons), "stats": st},
-                "mechs": mechs, "projectiles": [], "crates": [], "cubes": [], "pickups": pick,
+                "mechs": mechs, "projectiles": projs, "crates": [], "cubes": cubes, "pickups": pick,
                 "sounds": [], "beams": [], "events": events, "drops": [],
                 "zone": {"center": c, "radius": r, "next_center": self.z_next[0], "next_radius": self.z_next[1],
                          "shrink_start": ss, "shrink_end": se, "dps": dps},
@@ -207,7 +216,7 @@ class Sim:
             m.strafe = -m.strafe
             m.strafe_t = self.t + 1 + self.rng.random() * 2
         tier = {4.0: (150, 110), 2.5: (260, 140), 1.3: (420, 170), 0.7: (1e9, 200)}.get(m.skill, (300, 150))
-        hunt_r, fire_r = tier
+        hunt_r, fire_r = tier[0] * HUNT_MULT, tier[1]
         if math.dist(m.pos[:2], c) > r - 10 or d > hunt_r:
             mv = math.atan2(nc[1] - m.pos[1], nc[0] - m.pos[0])
             if math.dist(m.pos[:2], nc) < 40:
@@ -399,6 +408,8 @@ class Sim:
         return [self.me] if self.me.alive else []
 
     def damage(self, t, by, amt, ev):
+        if by is self.me:
+            amt *= 1 + 0.04 * min(self.me.cubes, 10)
         to_by = math.atan2(by.pos[1] - t.pos[1], by.pos[0] - t.pos[0])
         rear = abs(wrap(to_by - t.aim[0])) > math.pi / 2
         if rear:
@@ -413,6 +424,8 @@ class Sim:
         if t.hp <= 0 and t.alive:
             t.alive = False
             self.deaths.append((self.t, t.id))
+            for k in range(2):
+                self.cubes.append({"id": 5000 + len(self.cubes) + k + int(self.t * 10), "pos": [t.pos[0] + k * 2 - 1, t.pos[1], t.pos[2]]})
             if by is self.me:
                 ev.append({"type": "kill", "target": t.id})
             for w in t.weapons:
@@ -474,6 +487,13 @@ class Sim:
             for m in alive:
                 self.apply(m, acts.get(m.id, {}), ev)
             self.step_bullets(ev)
+            for cb in list(self.cubes):
+                if self.me.alive and math.dist(cb["pos"][:2], self.me.pos[:2]) < 3.5 and abs(cb["pos"][2] - self.me.pos[2]) < 4:
+                    self.cubes.remove(cb)
+                    self.me.cubes += 1
+                    self.me.max_hp = 1400 * (1 + 0.04 * min(self.me.cubes, 10))
+                    self.me.hp += 56
+                    ev.append({"type": "pickup", "cubes": self.me.cubes})
             c, r, dps = self.zone_now()
             for m in self.mechs:
                 if not m.alive:
@@ -526,23 +546,32 @@ class ExampleBot:
 
 
 def main():
-    global NOISE_MULT, LASER_BOTS
+    global NOISE_MULT, LASER_BOTS, HUNT_MULT, B
     ap = argparse.ArgumentParser()
     ap.add_argument("--matches", type=int, default=6)
     ap.add_argument("--kit", default="..")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--bot", choices=["ours", "example"], default="ours")
-    ap.add_argument("--noise", type=float, default=1.0)
-    ap.add_argument("--lasers", type=int, default=7)
+    ap.add_argument("--noise", type=float, default=5.0)
+    ap.add_argument("--lasers", type=int, default=3)
+    ap.add_argument("--hunt", type=float, default=1.0)
+    ap.add_argument("--botfile", default="")
+    ap.add_argument("--start", type=int, default=0, help="seed offset (for parallel runs)")
     args = ap.parse_args()
+    if args.botfile:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("botmod_alt", args.botfile)
+        B = importlib.util.module_from_spec(spec)
+        sys.path.insert(0, os.path.dirname(os.path.abspath(args.botfile)))
+        spec.loader.exec_module(B)
     import gzip
     with gzip.open(os.path.join(args.kit, "check", "stream.jsonl.gz"), "rt") as f:
         cfg = json.loads(f.readline())["config"]
     world = B.World(os.path.join(args.kit, "arena"))
-    NOISE_MULT, LASER_BOTS = args.noise, args.lasers
+    NOISE_MULT, LASER_BOTS, HUNT_MULT = args.noise, args.lasers, args.hunt
     pts = []
     for k in range(args.matches):
-        r = Sim(cfg, world, args.seed + k, B.Bot if args.bot == "ours" else ExampleBot).run()
+        r = Sim(cfg, world, args.seed + args.start + k, B.Bot if args.bot == "ours" else ExampleBot).run()
         pts.append(r["points"])
         print(json.dumps(r), flush=True)
     print("mean points %.2f over %d" % (sum(pts) / len(pts), len(pts)))
