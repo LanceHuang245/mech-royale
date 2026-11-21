@@ -18,7 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -378,6 +378,7 @@ class Bot:
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
         self.last_kill_t = -99.0
+        self.explore_wp, self.explore_until = None, 0.0
         self.mortar_g = cfg["weapons"]["mortar"].get("gravity", 22.0)
 
     def _late(self, ms):
@@ -1156,8 +1157,17 @@ class Bot:
                     bc = (d, cp)
             if bc and bc[0] > 20:
                 return bc[1][:2]
-        # drift toward the next zone centre, settle inside it
         nc, nr = zs["nc"], zs["nr"]
+        # farm: early on (one hunter at a time) explore the safe circle for crates instead of idling at its centre
+        if "farm" in self.flags and obs["t"] < 150 and not threats and not zs["must_go"]:
+            wp = self.explore_wp
+            if wp is None or math.dist(wp, pos[:2]) < 15 or obs["t"] > self.explore_until or not self._safe_point(zs, wp):
+                a = self.rng.random() * TAU
+                rr = max(nr - zs["margin"], 10.0) * math.sqrt(self.rng.random())
+                wp = (nc[0] + math.cos(a) * rr, nc[1] + math.sin(a) * rr)
+                self.explore_wp, self.explore_until = wp, obs["t"] + 25.0
+            return wp
+        # drift toward the next zone centre, settle inside it
         dn = math.dist(pos[:2], nc)
         if dn > max(nr * 0.55, 15):
             return nc
