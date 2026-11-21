@@ -28,6 +28,7 @@ def main():
     ap.add_argument("--kit", default="..")
     ap.add_argument("--entry", action="append", required=True)
     ap.add_argument("--max-t", type=float, default=480.0)
+    ap.add_argument("--econ", action="store_true", help="model crates, NPC drones, supply drops, cube upgrades")
     args = ap.parse_args()
 
     cfg = arena.load_cfg(args.kit)
@@ -54,7 +55,7 @@ def main():
         order = list(range(16))
         random.Random(seed * 31 + 7).shuffle(order)  # which slot gets which entry
         shuffled = [entries[i] for i in order]
-        sim = arena.League(cfg, world, seed, shuffled)
+        sim = arena.League(cfg, world, seed, shuffled, econ=args.econ)
         res = sim.run(args.max_t)
         for r in res:
             a = agg.setdefault(r["label"], {})

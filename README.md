@@ -45,7 +45,7 @@ League = 16 bots in a free-for-all, which is what the qualifying round and final
 | Switch (`bot.flags`, env `MR_FLAGS`) | Practice sim | League | Decision |
 | --- | --- | --- | --- |
 | `sneak` | 5.25 vs 5.40 (neutral) | +0.2 .. +0.65 | **on** |
-| `patient` (hold fire at range, hide) | 3.19 vs 5.40 (hurts) | +0.3 (noise) | off: practice score gates qualification |
+| `patient` (hold fire at range, hide) | sim 3.19 vs 5.40, but **real 4.04 vs 4.54** (submitted probe 42d652b) | +0.36 +- 0.22 (168 matches, with economy) | undecided: the real practice cost is small; choose at the deadline from the practice-board cutoff |
 | `jink` (faster strafe flips) | not run | +0.17 (noise) | off |
 | `early` (reach next circle sooner) | not run | -0.14 (noise) | off |
 | `laser_tight` | not run | -0.25 (noise), accuracy unchanged | off |
@@ -63,6 +63,13 @@ gain shows how much engineering that capability could ever be worth in a free-fo
 | 360 deg vision to 300 m, hearing x1.5 | +0.90 (se 0.29) |
 | Damage dealt +30% | +0.63 (se 0.34) |
 | Hit boxes 1.5x wider (gun hit rate ~44% -> ~65%) | +0.28 (se 0.27) |
+
+Cube economy (league with crates, NPC drones, supply drops, upgrade offers; hit boxes grow 5% per cube):
+starting with 5 cubes +1.02, with 10 cubes +1.67 (se 0.29); the normal bot ends a match with ~6 cubes on average.
+
+The real practice score of a submission is deterministic (resubmitting identical code gave the identical score),
+and the hide-and-wait probe scored 4.04 against a simulator prediction of ~3.3, i.e. the real house bots hunt a
+passive bot less aggressively than the practice sim models.
 
 Survivability dominates; aiming improvements are worth almost nothing. The only large legitimate source of
 effective HP is the cube economy (cubes: +4% HP and damage each up to 10, plus upgrade offers), which these
