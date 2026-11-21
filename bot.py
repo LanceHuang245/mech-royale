@@ -20,7 +20,7 @@ import mechfight as mf
 TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:110,armgo,armd:100,pickd:240,pickd2:160,"
                                       "prefl:180,prefg:140,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
-                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,hunt,hunthp:0.7,perch,percht:30,perchr:80").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
