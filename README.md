@@ -20,7 +20,7 @@ Bot for the **Builders – Mech Royale** track of the Builders Buildathon: it pi
 ## Strategy (v0.5)
 
 - Map model: building prisms rasterized to a 2 m grid + terrain, used for line of sight and wall avoidance.
-- Loadout: laser + lightning (gun as fallback); mortar is never picked up (laser cook-off risk).
+- Loadout: arm gun + laser (`gunlaser`); mortar is never picked up (laser cook-off risk).
 - Arm up first: while gun-only and not under fire, go for visible laser/lightning pickups.
 - Combat: leading gun aim, laser charge-and-release on target, lightning inside its cone, focus one target.
 - Survival: face attackers (rear hits x1.5), turn toward hidden attackers, break line of sight when
@@ -51,12 +51,19 @@ League = 16 bots in a free-for-all, which is what the qualifying round and final
 | `early` (reach next circle sooner) | not run | -0.14 (noise) | off |
 | `laser_tight` | not run | -0.25 (noise), accuracy unchanged | off |
 | A* navigation vs v0.3 | +0.4 (noise) | -0.14 +- 0.26 | kept (fixes a real stuck-in-pocket bug) |
-| `farm` (explore the safe circle for crates before 150 s) | `tools/practice.py`: +0.17 +- 0.28 (288 matches) | not run | off; only candidate worth a real probe |
+| `farm` (explore the safe circle for crates before 150 s) | `tools/practice.py`: +0.17 +- 0.28 (288 matches); **real 4.88 vs 4.75** | not run | **on** |
+| `gunlaser` (keep the arm gun, add a laser, skip lightning) | `tools/practice.py`: +1.12 +- 0.41; +1.51 / +0.90 / +1.58 under three opponent models | not run | **on** |
 
 Tried in `tools/practice.py` (288 paired matches, se ~0.27) and removed: gun-only bots backing off laser snipers
 instead of charging (+0.00), longer loot runs while unarmed (+0.01), stronger low-HP focus (-0.17), lightning
 chain targeting (-0.09), dodging to the goal side (-0.02), wider cover search (24 dirs, 6 threats: -0.64).
-Dodging itself is worth about +0.4 (turning it off: -0.42).
+Dodging itself is worth about +0.4 (turning it off: -0.42). Also dropped: gun + lightning (-1.83), closing to
+28 m whenever lightning is held (+0.44, noise), a 2x wider gun aim window (+0.14, noise).
+
+Practice upper bounds (`tools/practice.py`, capability granted to our bot only, 192 matches each): damage taken
+-30% +2.58, damage dealt +30% +2.08, max HP +30% +1.18, 360 deg vision +1.05, start with 10 cubes +0.95, spawn
+with laser + lightning +0.83, 1.5x hit boxes +0.56. Unlike the free-for-all, damage dealt is worth a lot in
+practice: every house bot killed is a placement point.
 
 ### Upper bounds ("oracle" switches in the league, paired, 120 matches each)
 

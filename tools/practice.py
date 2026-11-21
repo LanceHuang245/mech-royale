@@ -16,6 +16,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import arena as A  # noqa: E402
 
+wrap = A.wrap
+
 TIERS = [4.0] * 4 + [2.5] * 4 + [1.3] * 4 + [0.7] * 3  # house aim noise per slot 1..15 (easy .. expert)
 
 
@@ -28,6 +30,8 @@ class Squad(A.League):
         entries = [("ours", ours)] + [("house", A.make_factory("hunter:%g" % (s * noise), kit)) for s in TIERS]
         self.late, self.sight = late, sight
         super().__init__(cfg, world, seed, entries, econ=True)
+        if "o_arm" in getattr(self.bots[0], "flags", ()):  # oracle: spawn with the target loadout
+            self.mechs[0].weapons = [A.S.weapon("laser", cfg), A.S.weapon("lightning", cfg)]
 
     def _active(self, m):
         house = [x for x in self.mechs[1:] if x.alive]
@@ -46,21 +50,29 @@ class Squad(A.League):
         return super().targets(m)
 
     def obs_for(self, me, los_cache):
-        o = super().obs_for(me, los_cache)
         if me.id == 0:
-            return o
-        us = self.mechs[0]
-        seen = [m for m in o["mechs"] if m["id"] == 0]
-        if self._active(me):
-            if not seen and us.alive:  # shared vision: the squad always knows where we are
-                seen = [{"id": 0, "kind": "mech", "pos": list(us.pos), "vel": list(us.vel), "aim": list(us.aim),
-                         "hp": us.hp, "max_hp": us.max_hp, "cubes": us.cubes,
-                         "weapons": [w["kind"] for w in us.weapons if w], "charging": us.charge > 0}]
-        else:
-            seen = [m for m in seen if math.dist(m["pos"][:2], me.pos[:2]) < self.sight]
-            o["sounds"] = []
-        o["mechs"] = seen
-        return o
+            return super().obs_for(me, los_cache)
+        # house bots only use: us, nearby weapons, the zone and their own state (a lean obs is ~5x faster)
+        us, t = self.mechs[0], self.t
+        d = math.dist(us.pos[:2], me.pos[:2])
+        if self._active(me):  # shared vision: the squad always knows where we are
+            knows = us.alive
+        else:  # idle: own vision (200 m, 120 deg wedge or 45 m near range, line of sight) plus 5 s memory, inside sight
+            if us.alive and d <= min(200.0, self.sight) and (
+                    d <= 45 or abs(wrap(math.atan2(us.pos[1] - me.pos[1], us.pos[0] - me.pos[0]) - me.aim[0])) <= math.radians(60)) \
+                    and self._los_cached(me, us, los_cache):
+                me.seen[0] = t
+            knows = us.alive and t - me.seen.get(0, -99) <= 5 and d < self.sight
+        mechs = [{"id": 0, "kind": "mech", "pos": list(us.pos), "vel": list(us.vel), "aim": list(us.aim)}] if knows else []
+        c, r, _ = self.zone_now()
+        ss, _, _ = self.zone_info()
+        self.evs[me.id] = []
+        return {"t": t, "tick": int(round(t * 20)), "mechs": mechs, "sounds": [],
+                "pickups": [p for p in self.pickups if math.dist(p["pos"][:2], me.pos[:2]) < 90],
+                "self": {"pos": me.pos, "aim": me.aim, "weapons": me.weapons, "energy": me.energy,
+                         "in_zone": math.dist(me.pos[:2], c) <= r},
+                "zone": {"center": c, "radius": r, "next_center": self.z_next[0], "next_radius": self.z_next[1],
+                         "shrink_start": ss}}
 
 
 def main():

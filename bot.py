@@ -2,7 +2,7 @@
 
 Survival-first fighter for the 16-mech battle royale:
 - map-aware line of sight and wall avoidance (rasterized building prisms + terrain)
-- loadout goal: laser + lightning (gun as fallback), never mortar (laser cook-off risk)
+- loadout: arm gun + laser (both fire at range), never mortar (laser cook-off risk)
 - leading gun aim, laser charge/release, lightning in its cone
 - seeks cover to break line of sight and regenerate when hurt, outnumbered or outranged
 - stays ahead of the zone, farms crates / NPC drones / cubes when no enemy is around
@@ -18,7 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,gunlaser").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -745,8 +745,10 @@ class Bot:
         seen_ids = {p["id"] for p in obs["pickups"]}
         picks_all = list(obs["pickups"]) + [{"id": i, "kind": k, "pos": pp} for i, (k, pp) in self.known_picks.items()
                                             if i not in seen_ids]
+        # gunlaser: keep the arm gun and add a laser (both slots fire at once, both reach 230+ m)
+        want_kinds = ("laser",) if "gunlaser" in self.flags else WANT_KINDS
         for p in picks_all:
-            if p["kind"] not in WANT_KINDS or p["kind"] in held:
+            if p["kind"] not in want_kinds or p["kind"] in held:
                 continue
             if abs(p["pos"][2] - z) > 25:
                 continue
