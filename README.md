@@ -65,6 +65,12 @@ Practice upper bounds (`tools/practice.py`, capability granted to our bot only, 
 with laser + lightning +0.83, 1.5x hit boxes +0.56. Unlike the free-for-all, damage dealt is worth a lot in
 practice: every house bot killed is a placement point.
 
+Run-to-run noise: the same build on the same 48 practice-sim seeds scored 3.62 .. 5.42 over 10 runs (sd 0.60),
+because the bot reseeds its RNG every run. One real practice run cannot separate versions closer than about
+1 point (real 4.75 / 4.88 / 4.69 are the same bot within noise), and the sim needs ~300 paired matches per side
+for a 0.3 se. `--pref 0.6` (house bots fight closer) is the default: the only setting tried that also reproduces
+the real gunlaser result.
+
 ### Upper bounds ("oracle" switches in the league, paired, 120 matches each)
 
 A capability is granted for free to 4 of the 16 mechs (flags `o_acc`, `o_dmgin`, `o_dmgout`, `o_hp`, `o_vis`), so the
