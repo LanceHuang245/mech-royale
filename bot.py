@@ -835,6 +835,10 @@ class Bot:
         if rear_hidden and not (target and target["shoot"] and target["d"] < 45):
             if not (lw and (lw.get("charge", 0) or 0) > 0):
                 shoot_at = None
+        # quietheal: regen needs 5 s without dealing damage too, so hold fire while retreating unless pressed hard
+        if shoot_at and "quietheal" in self.flags and self.retreating and \
+                not (target and target["shoot"] and target["d"] < 40):
+            shoot_at = None
         if shoot_at:
             kind, ctr, vel, d, rad = shoot_at
             mx, my, mz = x, y, z + muzzle_h
