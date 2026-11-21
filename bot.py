@@ -18,7 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "sneak").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -327,7 +327,7 @@ class Bot:
         cfg = hello["config"]
         self.cfg = cfg
         self.me_id = hello.get("slot", -1)
-        self.rng = random.Random(hello.get("seed", 0))
+        self.rng = random.Random()  # fresh entropy each run: repeat submissions sample different matches
         self.world = World(hello.get("map", {}).get("dir", "/arena"))
         self.reach = cfg["loot"]["pickup_radius"]
         self.vision = cfg["vision"]
@@ -598,8 +598,8 @@ class Bot:
             else:
                 self.search = Search(nav, sc, ec)
                 self.search_goal = gc
-        if self.search is not None and not self._late(20):
-            self.search.step(self.t0 + 0.026)
+        if self.search is not None and not self._late(10):
+            self.search.step(self.t0 + 0.012)
             if self.search.done:
                 self.path = self.search.path
                 self.path_goal = self.search_goal
@@ -664,6 +664,13 @@ class Bot:
         self.t0 = time.perf_counter()
         t = obs["t"]
         me = obs["self"]
+        # enemy hp/max_hp/cubes/weapons/charging are optional in the schema: fill defaults so lookups never throw
+        for m in obs["mechs"]:
+            m.setdefault("max_hp", 1400.0)
+            m.setdefault("hp", m["max_hp"])
+            m.setdefault("cubes", 0)
+            m.setdefault("weapons", [])
+            m.setdefault("charging", False)
         pos = me["pos"]
         x, y, z = pos
         st = me["stats"]
@@ -704,7 +711,7 @@ class Bot:
             d = math.dist(mp[:2], pos[:2])
             scale = 1 + 0.05 * m.get("cubes", 0)
             center = (mp[0], mp[1], mp[2] + 4.5 * scale)
-            if d < 300 and not (d > 60 and self._late(15)):
+            if d < 300 and not (d > 60 and self._late(10)):
                 vis = self.world.los(eye, (mp[0], mp[1], mp[2] + 8 * scale))
                 shoot = vis or self.world.los((x, y, z + muzzle_h), center)
             else:
@@ -1171,10 +1178,10 @@ class Bot:
             a = k * TAU / 16
             ca, sa = math.cos(a), math.sin(a)
             prev_s = 0.0
-            if self._late(28) and best is not None:
+            if self._late(16) and best is not None:
                 break
             for dist in (7.0, 14.0, 22.0, 32.0, 44.0, 58.0, 75.0):
-                if self._late(33) and best is not None:
+                if self._late(20) and best is not None:
                     break
                 ok = True
                 s = prev_s + 3.5

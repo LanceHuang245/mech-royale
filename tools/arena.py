@@ -187,6 +187,7 @@ class League(S.Sim):
             m.label = entries[i][0]
             m.step_t = 0.0
             m.act_ms = []
+            m.cpu_ms = []
             m.stats = {}
             m.upg = {}
             m.offer = None
@@ -592,6 +593,7 @@ class League(S.Sim):
             for m in alive:
                 o = self.obs_for(m, cache)
                 t0 = time.perf_counter()
+                c0 = time.thread_time()
                 try:
                     a = self.bots[m.id].act(o) or {}
                 except Exception as e:  # a crashing bot idles, like the real wrapper falls back to the last action
@@ -600,6 +602,7 @@ class League(S.Sim):
                         print("bot error", m.label, repr(e), file=sys.stderr)
                     a = {}
                 m.act_ms.append((time.perf_counter() - t0) * 1000)
+                m.cpu_ms.append((time.thread_time() - c0) * 1000)
                 acts[m.id] = a
             for m in alive:
                 self.apply(m, acts[m.id], None)
@@ -652,7 +655,9 @@ class League(S.Sim):
             m.stats["plating"] = m.upg.get("plating", 0)
             m.stats["armor_up"] = m.upg.get("armor", 0)
             ms = sorted(m.act_ms)
-            out.append({"id": m.id, "label": m.label, "place": place[m.id], "points": 16 - place[m.id],
+            cs = sorted(m.cpu_ms)
+            out.append({"cpu_p99": round(cs[int(len(cs) * 0.99)], 2) if cs else 0, "cpu_max": round(cs[-1], 2) if cs else 0,
+                        "id": m.id, "label": m.label, "place": place[m.id], "points": 16 - place[m.id],
                         "act_p99": round(ms[int(len(ms) * 0.99)], 2) if ms else 0, "act_max": round(ms[-1], 2) if ms else 0,
                         "stats": dict(m.stats), "alive_s": round(self.deaths_t.get(m.id, self.t), 1)})
         return out
