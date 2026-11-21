@@ -20,7 +20,7 @@ import mechfight as mf
 TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:110,armgo,armd:100,pickd:240,pickd2:160,"
                                       "prefl:180,prefg:140,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
-                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,hunt,hunthp:0.7").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -383,6 +383,8 @@ class Bot:
         self.flags = set(FLAGS)  # strategy switches (tools/arena.py sets them per instance)
         self.hide_until = 0.0
         self.wig_sign, self.wig_until = 1, 0.0
+        self.peek_tick, self.peek_cover, self.peek_from, self.peek_t = -99, None, None, -99.0
+        self.last_enemy = None  # (t, (x, y)) of the nearest enemy last seen
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
@@ -738,6 +740,9 @@ class Bot:
                 vis = shoot = False
             enemies.append({"m": m, "d": d, "vis": vis, "shoot": shoot, "center": center, "scale": scale})
         threats = [e for e in enemies if e["vis"] and e["d"] < 240]
+        if enemies:
+            e0 = min(enemies, key=lambda e: e["d"])
+            self.last_enemy = (t, (e0["m"]["pos"][0], e0["m"]["pos"][1]))
         npcs = [m for m in obs["mechs"] if m["kind"] == "npc"]
         # attackers we cannot see: place a pseudo-threat along the damage bearing
         known = {e["m"]["id"] for e in enemies}
@@ -1020,6 +1025,26 @@ class Bot:
             else:
                 goal = None
             self.mode = mode
+        # peek: a laser fires once per ~2.4 s; spend the cooldown behind cover instead of standing in the open,
+        # then step back out to the spot we fired from with the next charge already building
+        if "peek" in self.flags and lw is not None and gw is None:
+            if mode == "fight" and (lw.get("cooldown", 0) or 0) > 0.4 and target["d"] > self._k("peekd", 50):
+                if self.tick_n - self.peek_tick >= 4:
+                    self.peek_cover = self._find_cover(pos, threats or [target], zs, st)
+                    self.peek_tick = self.tick_n
+                pc = self.peek_cover
+                if pc and pc[0] is not None and pc[1] == 0 and math.dist(pc[0][:2], pos[:2]) < 30:
+                    if self.peek_t < t - 0.5:
+                        self.peek_from = (x, y)
+                    self.peek_t = t
+                    mode = "peek"
+                    goal = pc[0][:2]
+            elif mode in ("roam", "cube") and self.peek_from and t - self.peek_t < 4 and enemies:
+                mode = "peekback"
+                goal = self.peek_from
+                if (lw.get("cooldown", 0) or 0) <= 0.05:
+                    fire[li] = True  # come out with the beam already charging
+            self.mode = mode
         if mode == "fight":
             d = target["d"]
             pref = self._k("prefl", 110) if has_laser else (28 if has_light else self._k("prefg", 85))
@@ -1185,6 +1210,18 @@ class Bot:
                     best = (d, c["pos"][:2])
         if best and (not threats or best[0] < 20):
             return best[1]
+        # hunt: armed and healthy, go to the last enemy we saw or heard instead of wandering
+        t = obs["t"]
+        armed = any(w and w["kind"] in ("laser", "lightning") for w in obs["self"]["weapons"])
+        if "hunt" in self.flags and armed and hp_frac > self._k("hunthp", 0.7) and not zs["must_go"]:
+            tgt = None
+            if self.last_enemy and t - self.last_enemy[0] < 10:
+                tgt = self.last_enemy[1]
+            elif self.last_sound and t - self.last_sound[0] < 6:
+                b = self.last_sound[1]
+                tgt = (x + math.cos(b) * 80, y + math.sin(b) * 80)
+            if tgt is not None and math.dist(tgt, pos[:2]) > 15 and self._safe_point(zs, (tgt[0], tgt[1], z)):
+                return tgt
         # supply drops when calm
         if not threats and hp_frac > 0.45:
             for dr in obs.get("drops", []):
