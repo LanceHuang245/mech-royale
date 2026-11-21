@@ -151,8 +151,26 @@ class ExampleBot(S.ExampleBot):
 # ------------------------------------------------------------------------------------------------
 # league simulator
 # ------------------------------------------------------------------------------------------------
+class Prop(S.Mech):
+    """Crate or NPC drone: a damageable thing that is not a player (never counted in placements)."""
+
+    def __init__(self, pid, pos, kind, hp):
+        super().__init__(pid, pos, 0.0, [None, None])
+        self.kind = kind
+        self.hp = self.max_hp = float(hp)
+        self.home = list(pos)
+        self.cubes = 0
+        self.o_out = self.o_in = self.o_acc = 1.0
+        self.o_vis = False
+        self.armor = 0.0
+        self.stats = {}
+        self.cd = 0.0
+        self.wt = 0.0
+        self.wdir = (0.0, 0.0)
+
+
 class League(S.Sim):
-    def __init__(self, cfg, world, seed, entries, nav_cache=None):
+    def __init__(self, cfg, world, seed, entries, nav_cache=None, econ=False):
         """entries: list of 16 (label, factory) with factory(hello, world) -> bot instance."""
         self.cfg, self.w, self.rng = cfg, world, random.Random(seed)
         self.t = 0.0
@@ -170,6 +188,14 @@ class League(S.Sim):
             m.step_t = 0.0
             m.act_ms = []
             m.stats = {}
+            m.upg = {}
+            m.offer = None
+            m.offer_q = 0
+            m.offer_n = 0
+            m.thr_i = 0
+            m.armor = 0.0
+            m.regen_mul = 1.0
+            m.regen_delay = float(cfg["mech"]["regen_delay"])
             self.mechs.append(m)
         self.pickups = []
         for k in range(40):
@@ -178,6 +204,16 @@ class League(S.Sim):
         self.bullets = []
         self.cubes = []
         self.deaths = []
+        self.econ = econ
+        self.props = []
+        self.drops = []
+        self.drops_called = set()
+        self.thr = cfg["cubes"]["upgrade_thresholds"]
+        if econ:
+            for k in range(27):  # 36 crates in the real game, a quarter on roofs (not modelled)
+                self.props.append(Prop(1000 + k, self._open_point(self.z_center, self.z_radius * 0.9), "crate", 300))
+            for k in range(12):
+                self.props.append(Prop(100 + k, self._open_point(self.z_center, self.z_radius * 0.8), "npc", 350))
         self.evs = {i: [] for i in range(16)}
         self.snd_buf = []
         self.snd_prev = []
@@ -198,6 +234,9 @@ class League(S.Sim):
             m.o_vis = "o_vis" in fl                      # 360 deg vision to 300 m, hearing x1.5 with half the noise
             if "o_hp" in fl:
                 m.hp = m.max_hp = 1400.0 * 1.3
+            for tag, n in (("o_cubes5", 5), ("o_cubes10", 10), ("o_cubes15", 15)):
+                if tag in fl:
+                    self._give_cubes(m, n)
 
     # ---------------------------------------------------------------- sounds
     def _sound(self, kind, m):
@@ -236,7 +275,8 @@ class League(S.Sim):
                 continue
             perp = abs(rel[0] * d[1] - rel[1] * d[0])
             hz = o[2] + d[2] * along / max(1e-6, math.hypot(d[0], d[1]))
-            if perp < 2.5 * m.o_acc and t.pos[2] - 0.5 <= hz <= t.pos[2] + 9.5:
+            sc = 1.0 + 0.05 * t.cubes
+            if perp < 2.5 * m.o_acc * sc and t.pos[2] - 0.5 <= hz <= t.pos[2] + 9.5 * sc:
                 if self.w.los(o, (t.pos[0], t.pos[1], hz)) and (best is None or along < best[0]):
                     best = (along, t)
         if best:
@@ -259,11 +299,14 @@ class League(S.Sim):
                 hit = None
                 for t in self.targets(shooter):
                     px, py = t.pos[0], t.pos[1]
+                    if abs(px - o[0]) > 30 or abs(py - o[1]) > 30:
+                        continue
                     sx, sy = b["pos"][0] - o[0], b["pos"][1] - o[1]
                     L = sx * sx + sy * sy or 1e-9
                     u = max(0.0, min(1.0, ((px - o[0]) * sx + (py - o[1]) * sy) / L))
                     cx, cy, cz = o[0] + sx * u, o[1] + sy * u, o[2] + (b["pos"][2] - o[2]) * u
-                    if math.hypot(cx - px, cy - py) < rad and t.pos[2] - 0.3 <= cz <= t.pos[2] + 9.3:
+                    sc = 1.0 + 0.05 * t.cubes
+                    if math.hypot(cx - px, cy - py) < rad * sc and t.pos[2] - 0.3 <= cz <= t.pos[2] + 9.3 * sc:
                         hit = t
                         break
                 if hit:
@@ -297,26 +340,43 @@ class League(S.Sim):
 
     # ---------------------------------------------------------------- combat rules (everyone fights everyone)
     def targets(self, m):
-        return [x for x in self.mechs if x.alive and x is not m]
+        if isinstance(m, Prop):
+            return []
+        res = [x for x in self.mechs if x.alive and x is not m]
+        if self.props:
+            res += [q for q in self.props if q.alive]
+        return res
 
     def damage(self, t, by, amt, ev):
         self._stat(by, {"gun": "gun_hits", "laser": "laser_hits", "lightning": "light_hits"}[self._kind])
         self._stat(by, "dmg_out", amt)
         self._stat(t, "dmg_in", amt)
-        amt *= (1 + 0.04 * min(by.cubes, 10)) * by.o_out * t.o_in
+        amt *= (1 + 0.04 * min(by.cubes, 10)) * by.o_out * t.o_in * (1.0 - t.armor)
         to_by = math.atan2(by.pos[1] - t.pos[1], by.pos[0] - t.pos[0])
-        rear = abs(wrap(to_by - t.aim[0])) > math.pi / 2
+        rear = (not isinstance(t, Prop)) and abs(wrap(to_by - t.aim[0])) > math.pi / 2
         if rear:
             amt *= 1.5
         t.hp -= amt
         t.last_dmg = self.t
         by.last_dmg = self.t
-        self.evs[t.id].append({"type": "damaged", "amount": amt, "weapon": "gun", "bearing": to_by, "by": by.id, "rear": rear})
-        self.evs[by.id].append({"type": "hit", "target": t.id, "amount": amt, "weapon": "gun"})
+        wname = "npc" if isinstance(by, Prop) else "gun"
+        if t.id in self.evs:
+            self.evs[t.id].append({"type": "damaged", "amount": amt, "weapon": wname, "bearing": to_by, "by": by.id, "rear": rear})
+        if by.id in self.evs:
+            self.evs[by.id].append({"type": "hit", "target": t.id, "amount": amt, "weapon": "gun"})
         if t.hp <= 0 and t.alive:
             self._die(t, by)
 
     def _die(self, t, by):
+        if isinstance(t, Prop):
+            t.alive = False
+            for k in range(1 if t.kind == "crate" else 2):
+                self.cubes.append({"id": 5000 + len(self.cubes) + k + int(self.t * 10), "pos": [t.pos[0] + k * 2 - 1, t.pos[1], t.pos[2]]})
+            if t.kind == "crate":
+                self._sound("crate", t)
+                if self.rng.random() < 0.5:
+                    self.pickups.append({"id": 9800 + t.id, "kind": self.rng.choice(["mortar", "laser", "lightning"]), "pos": list(t.pos)})
+            return
         t.alive = False
         self.deaths.append((self.t, t.id))
         self.deaths_t[t.id] = self.t
@@ -324,11 +384,113 @@ class League(S.Sim):
         for k in range(2 + t.cubes):
             self.cubes.append({"id": 5000 + len(self.cubes) + k + int(self.t * 10),
                                "pos": [t.pos[0] + (k % 3) * 2 - 2, t.pos[1] + (k // 3) * 2, t.pos[2]]})
-        if by is not None:
+        if by is not None and by.id in self.evs:
             self.evs[by.id].append({"type": "kill", "target": t.id})
         for w in t.weapons:
             if w and w["kind"] != "gun":
                 self.pickups.append({"id": 9500 + t.id * 3 + len(self.pickups), "kind": w["kind"], "pos": list(t.pos)})
+
+    # ---------------------------------------------------------------- economy
+    def _recalc_hp(self, m):
+        new_max = 1400.0 * (1.15 ** m.upg.get("plating", 0)) * (1 + 0.04 * min(m.cubes, 10))
+        if "o_hp" in getattr(self.bots[m.id], "flags", set()):
+            new_max *= 1.3
+        if new_max > m.max_hp:
+            m.hp += new_max - m.max_hp
+        m.max_hp = new_max
+
+    def _give_cubes(self, m, n):
+        m.cubes += n
+        self._recalc_hp(m)
+        while m.thr_i < len(self.thr) and m.cubes >= self.thr[m.thr_i]:
+            m.offer_q += 1
+            m.thr_i += 1
+        self.evs[m.id].append({"type": "pickup", "cubes": m.cubes})
+
+    def _offer_tick(self, m, pick):
+        if m.offer is None and m.offer_q > 0:
+            avail = [u for u in self.cfg["upgrades"] if m.upg.get(u["id"], 0) < u["max"] and
+                     (("requires" not in u) or any(w and w["kind"] == u["requires"] for w in m.weapons))]
+            ch = self.rng.sample(avail, min(3, len(avail)))
+            m.offer = {"id": m.offer_n, "expires": round(self.t + 5.0, 2),
+                       "choices": [{"id": u["id"], "name": u["name"], "desc": u["desc"]} for u in ch]}
+            m.offer_n += 1
+            m.offer_q -= 1
+            return
+        if m.offer is not None:
+            n = len(m.offer["choices"])
+            if isinstance(pick, int) and 0 <= pick < n:
+                idx = pick
+            elif self.t >= m.offer["expires"]:
+                idx = 0
+            else:
+                return
+            uid = m.offer["choices"][idx]["id"]
+            m.upg[uid] = m.upg.get(uid, 0) + 1
+            if uid == "plating":
+                self._recalc_hp(m)
+            elif uid == "armor":
+                m.armor += 0.08
+            elif uid == "nanites":
+                m.regen_mul *= 1.6
+                m.regen_delay -= 1.5
+            self.evs[m.id].append({"type": "upgrade", "id": uid})
+            m.offer = None
+
+    def _econ_step(self, alive):
+        cfg = self.cfg
+        # NPC drones wander near home and shoot at mechs within 45 m
+        for p in self.props:
+            if not p.alive or p.kind != "npc":
+                continue
+            p.wt -= DT
+            if p.wt <= 0:
+                if self.rng.random() < 0.3:
+                    p.wdir = (0.0, 0.0)
+                else:
+                    a = self.rng.random() * math.tau
+                    p.wdir = (math.cos(a), math.sin(a))
+                p.wt = 1.0 + 2.0 * self.rng.random()
+            nx, ny = p.pos[0] + p.wdir[0] * 5.0 * DT, p.pos[1] + p.wdir[1] * 5.0 * DT
+            if math.dist((nx, ny), p.home[:2]) < 30 and not self.w.blocked(nx, ny, p.pos[2], 1.5):
+                p.pos = [nx, ny, self.w.ground(nx, ny)]
+            p.cd -= DT
+            if p.cd <= 0:
+                best, bd = None, 45.0
+                for m in alive:
+                    d = math.dist(m.pos[:2], p.pos[:2])
+                    if d < bd and self.w.los((p.pos[0], p.pos[1], p.pos[2] + 3), (m.pos[0], m.pos[1], m.pos[2] + 4.5), 3.0):
+                        best, bd = m, d
+                if best is not None:
+                    p.cd = 1.0
+                    if self.rng.random() < 0.6:
+                        self._kind = "gun"
+                        self.damage(best, p, 25.0, None)
+        # supply drops
+        dr = cfg["drops"]
+        for k, tt in enumerate(dr["times"]):
+            if self.t >= tt and k not in self.drops_called:
+                self.drops_called.add(k)
+                nc, nr = self.z_next
+                pos = self._open_point(nc, max(10.0, nr * 0.7))
+                self.drops.append({"id": 20000 + k, "pos": pos, "land": self.t + dr["fall_s"], "progress": 0.0, "holder": None})
+        for d in list(self.drops):
+            if self.t < d["land"]:
+                continue
+            inside = [m for m in alive if m.alive and math.dist(m.pos[:2], d["pos"][:2]) <= dr["radius"]]
+            if len(inside) == 1:
+                if d["holder"] == inside[0].id:
+                    d["progress"] += DT
+                else:
+                    d["holder"], d["progress"] = inside[0].id, DT
+            else:
+                d["holder"], d["progress"] = None, 0.0
+            if d["progress"] >= dr["capture_s"] and d["holder"] is not None:
+                m = self.mechs[d["holder"]]
+                self._give_cubes(m, dr["cubes"])
+                m.hp, m.energy = m.max_hp, 100.0
+                self.evs[m.id].append({"type": "drop", "id": d["id"], "cubes": m.cubes})
+                self.drops.remove(d)
 
     # ---------------------------------------------------------------- observations
     def _los_cached(self, a, b, cache):
@@ -362,6 +524,14 @@ class League(S.Sim):
                               "hp": m.hp, "max_hp": m.max_hp, "cubes": m.cubes,
                               "weapons": [w["kind"] for w in m.weapons if w], "charging": m.charge > 0})
 
+        for q in self.props:
+            if q.alive and q.kind == "npc" and math.dist(q.pos[:2], me.pos[:2]) <= (300 if me.o_vis else 200):
+                ang = math.atan2(q.pos[1] - me.pos[1], q.pos[0] - me.pos[0])
+                if (math.dist(q.pos[:2], me.pos[:2]) <= 45 or me.o_vis or abs(wrap(ang - me.aim[0])) <= math.radians(60)) and \
+                        self.w.los(eye, (q.pos[0], q.pos[1], q.pos[2] + 2.0), 3.0):
+                    mechs.append({"id": q.id, "kind": "npc", "pos": list(q.pos), "vel": [q.wdir[0] * 5.0, q.wdir[1] * 5.0, 0.0],
+                                  "aim": [0.0, 0.0], "hp": q.hp, "max_hp": q.max_hp})
+
         def vis_point(p, near=45):
             d = math.dist(p[:2], me.pos[:2])
             if d > (300 if me.o_vis else 200):
@@ -372,6 +542,11 @@ class League(S.Sim):
 
         pick = [p for p in self.pickups if math.dist(p["pos"][:2], me.pos[:2]) < 200 and vis_point(p["pos"])]
         cubes = [dict(c) for c in self.cubes if math.dist(c["pos"][:2], me.pos[:2]) < 200 and vis_point(c["pos"])]
+        crates = [{"id": q.id, "pos": list(q.pos), "hp": q.hp} for q in self.props
+                  if q.alive and q.kind == "crate" and math.dist(q.pos[:2], me.pos[:2]) < 200 and vis_point(q.pos)]
+        drops = [{"id": d["id"], "pos": list(d["pos"]), "radius": self.cfg["drops"]["radius"],
+                  "lands_in": round(max(0.0, d["land"] - t), 2), "capture_s": self.cfg["drops"]["capture_s"],
+                  "progress": round(d["progress"], 2), "holder": d["holder"]} for d in self.drops]
         projs = []
         for b in self.bullets:
             if b["by"] != me.id and math.dist(b["pos"][:2], me.pos[:2]) < 110:
@@ -396,13 +571,13 @@ class League(S.Sim):
                 "alive": sum(m.alive for m in self.mechs),
                 "self": {"id": me.id, "pos": list(me.pos), "vel": list(me.vel), "aim": list(me.aim), "hp": me.hp,
                          "max_hp": round(me.max_hp, 1), "energy": me.energy, "max_energy": 100, "grounded": me.grounded,
-                         "cubes": me.cubes, "upgrades": [], "in_zone": math.dist(me.pos[:2], c) <= r,
+                         "cubes": me.cubes, "upgrades": [u for u, n in me.upg.items() for _ in range(n)], "in_zone": math.dist(me.pos[:2], c) <= r,
                          "weapons": copy.deepcopy(me.weapons), "stats": dict(self.cfg["mech"])},
-                "mechs": mechs, "projectiles": projs, "crates": [], "cubes": cubes, "pickups": pick,
-                "sounds": sounds, "beams": [], "events": events, "drops": [],
+                "mechs": mechs, "projectiles": projs, "crates": crates, "cubes": cubes, "pickups": pick,
+                "sounds": sounds, "beams": [], "events": events, "drops": drops,
                 "zone": {"center": c, "radius": r, "next_center": self.z_next[0], "next_radius": self.z_next[1],
                          "shrink_start": ss, "shrink_end": se, "dps": dps},
-                "offer": None}
+                "offer": me.offer}
 
     # ---------------------------------------------------------------- main loop
     def run(self, max_t=480):
@@ -429,6 +604,11 @@ class League(S.Sim):
             for m in alive:
                 self.apply(m, acts[m.id], None)
             self.step_bullets(None)
+            if self.econ:
+                self._econ_step(alive)
+            for m in alive:
+                if m.alive:
+                    self._offer_tick(m, acts[m.id].get("pick"))
             for cb in list(self.cubes):
                 best, bd = None, 3.5
                 for m in alive:
@@ -438,10 +618,7 @@ class League(S.Sim):
                             best, bd = m, d
                 if best is not None:
                     self.cubes.remove(cb)
-                    best.cubes += 1
-                    best.max_hp = 1400 * (1 + 0.04 * min(best.cubes, 10))
-                    best.hp += 56
-                    self.evs[best.id].append({"type": "pickup", "cubes": best.cubes})
+                    self._give_cubes(best, 1)
             c, r, dps = self.zone_now()
             for m in self.mechs:
                 if not m.alive:
@@ -452,8 +629,8 @@ class League(S.Sim):
                     self.evs[m.id].append({"type": "damaged", "amount": dps * DT, "weapon": "zone", "bearing": None, "by": None})
                     if m.hp <= 0:
                         self._die(m, None)
-                elif self.t - m.last_dmg > cfg["regen_delay"]:
-                    m.hp = min(m.max_hp, m.hp + cfg["regen_per_s"] * DT)
+                elif self.t - m.last_dmg > m.regen_delay:
+                    m.hp = min(m.max_hp, m.hp + cfg["regen_per_s"] * m.regen_mul * DT)
             self.step_zone()
             self.t += DT
         return self.results()
@@ -471,6 +648,9 @@ class League(S.Sim):
                 nxt += 1
         out = []
         for m in self.mechs:
+            m.stats["cubes"] = m.cubes
+            m.stats["plating"] = m.upg.get("plating", 0)
+            m.stats["armor_up"] = m.upg.get("armor", 0)
             ms = sorted(m.act_ms)
             out.append({"id": m.id, "label": m.label, "place": place[m.id], "points": 16 - place[m.id],
                         "act_p99": round(ms[int(len(ms) * 0.99)], 2) if ms else 0, "act_max": round(ms[-1], 2) if ms else 0,
