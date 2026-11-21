@@ -12,10 +12,11 @@ Bot for the **Builders – Mech Royale** track of the Builders Buildathon: it pi
 | `mechfight.py` | Protocol wrapper (stdin/stdout loop, types, debug drawing). |
 | `tools/sim.py` | Rough local simulator (our bot vs 15 hunting stand-in bots) for smoke tests. Not the real game. |
 | `tools/diag.py` | Per-match diagnostics on the simulator (cause/time of death, stuck time, time per mode). |
+| `tools/arena.py`, `tools/league.py`, `tools/league_merge.py` | 16-bot free-for-all simulator: every mech runs a bot instance with protocol-level vision/sound. `league.py` fields several bot versions in the same matches (paired comparison) next to naive hunters and the kit example. |
 | `tools/trace.py` | Step-by-step trace of one simulated match (who hurts us, mode, position, goal). |
 | `tools/early.py` | Profile of the first minute of many matches (arming time, damage by attacker tier). |
 
-## Strategy (v0.4)
+## Strategy (v0.5)
 
 - Map model: building prisms rasterized to a 2 m grid + terrain, used for line of sight and wall avoidance.
 - Loadout: laser + lightning (gun as fallback); mortar is never picked up (laser cook-off risk).
@@ -31,7 +32,24 @@ Bot for the **Builders – Mech Royale** track of the Builders Buildathon: it pi
   a no-progress watchdog replans (or jets over the obstacle) when the bot jitters in a pocket.
 - Loot run: boost towards far weapons/cubes when nobody is close; with no cover and only the gun, go
   arm up (or charge a laser sniper) instead of trading shots at range.
+- Quiet movement (`sneak`, on by default): while enemies are known or heard and nobody is shooting at us,
+  walk at <= 4.6 m/s. Below 5 m/s a mech makes no step sound, so sound-following opponents cannot locate us.
 - Time guard: every decision stops optional work after ~15-30 ms (hard limit is 50 ms on 1 CPU).
+
+## Experiment log (what the simulators said)
+
+Practice-style sim = 1 bot vs 15 hunting house-style bots, calibrated so the kit example scores ~1.2
+(real 1.15) and earlier versions land near their real scores (3.71 / 4.44 / 4.75 real vs 4.1 / 4.9 / 5.5 sim).
+League = 16 bots in a free-for-all, which is what the qualifying round and final look like.
+
+| Switch (`bot.flags`, env `MR_FLAGS`) | Practice sim | League | Decision |
+| --- | --- | --- | --- |
+| `sneak` | 5.25 vs 5.40 (neutral) | +0.2 .. +0.65 | **on** |
+| `patient` (hold fire at range, hide) | 3.19 vs 5.40 (hurts) | +0.3 (noise) | off: practice score gates qualification |
+| `jink` (faster strafe flips) | not run | +0.17 (noise) | off |
+| `early` (reach next circle sooner) | not run | -0.14 (noise) | off |
+| `laser_tight` | not run | -0.25 (noise), accuracy unchanged | off |
+| A* navigation vs v0.3 | +0.4 (noise) | -0.14 +- 0.26 | kept (fixes a real stuck-in-pocket bug) |
 
 ## Local testing (uv)
 
@@ -42,6 +60,7 @@ uv run python ../check/check.py -- python -u bot.py
 uv run python tools/sim.py --matches 16                  # local smoke test (defaults are calibrated:
 uv run python tools/sim.py --matches 16 --bot example    #  kit example ~1.2, v0.2 bot ~4.1; real 1.15 / 3.71)
 uv run python tools/sim.py --matches 16 --botfile other_bot.py   # A/B another version of the bot
+uv run python tools/league.py --matches 12 --entry new=bot:bot.py?sneak=8 --entry old=bot:other_bot.py=8   # paired league A/B
 docker build -t mech-royale .
 python ../check/check.py --map-dir /arena -- docker run --rm -i --network none --cpus 1 --memory 512m --read-only --tmpfs /tmp:rw,size=64m --user 65534:65534 -v "<abs path to kit>/arena:/arena:ro" mech-royale
 ```

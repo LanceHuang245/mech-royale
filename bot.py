@@ -18,7 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "").split(",") if x)  # experiment switches (dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "sneak").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -372,6 +372,8 @@ class Bot:
         self.prog_pos = None
         self.noprog = 0
         self.boosting = False
+        self.flags = set(FLAGS)  # strategy switches (tools/arena.py sets them per instance)
+        self.hide_until = 0.0
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
@@ -416,7 +418,7 @@ class Bot:
         need = max(0.0, d_next - (nr - margin))
         time_left = ss - t if t < ss else se - t
         urgent = (not obs["self"]["in_zone"]) or d_cur > r - 8
-        must_go = urgent or (need > 0 and need / walk + 12 > time_left)
+        must_go = urgent or (need > 0 and need / walk + (24 if "early" in self.flags else 12) > time_left)
         return {"c": c, "r": r, "nc": nc, "nr": nr, "margin": margin, "must_go": must_go,
                 "urgent": urgent, "need": need, "dps": z.get("dps", 0)}
 
@@ -446,6 +448,24 @@ class Bot:
             kind, p = self.known_picks[pid]
             if math.dist(p[:2], pos[:2]) < 28 and abs(p[2] - pos[2]) < 14 and w.los(eye, (p[0], p[1], p[2] + 1.0)):
                 del self.known_picks[pid]
+
+    # --- free-for-all etiquette ----------------------------------------------------------------
+    def _engage_ok(self, obs, me, target, t):
+        """Should we open fire on this target? In a free-for-all every death before ours is worth the same,
+        so we only start fights that are cheap: close range, weakened or distracted targets, ambushes from
+        outside their view, or when they already shot at us."""
+        m, d = target["m"], target["d"]
+        if d < 55 or obs["alive"] <= 4:
+            return True
+        if m["hp"] < 0.55 * m["max_hp"]:
+            return True
+        if t - self.attackers.get(m["id"], -99.0) < 6.0 or m.get("charging"):
+            return True
+        x, y = me["pos"][0], me["pos"][1]
+        brg = math.atan2(y - m["pos"][1], x - m["pos"][0])
+        if abs(wrap(m["aim"][0] - brg)) > math.radians(75):
+            return True  # its back/side is turned to us: free rear-armor hits
+        return False
 
     # --- incoming fire -------------------------------------------------------------------------
     def _dodge(self, obs, me, enemies, t, can_zap):
@@ -757,6 +777,11 @@ class Bot:
             if s < best:
                 best, target = s, e
         self.target_id = target["m"]["id"] if target else None
+        hide = False
+        if "patient" in self.flags and target is not None and not self._engage_ok(obs, me, target, t):
+            hide = True
+            target = None
+            self.hide_until = t + 2.0
 
         # secondary targets for cubes (crates / NPCs) when no enemy can be shot
         farm = None
@@ -818,7 +843,8 @@ class Bot:
                 if in_range and (kind == "mech" or kind == "npc" or (kind == "crate" and not gw)):
                     if charge > 0:
                         laser_ready = charge >= full - 0.02
-                        err = abs(wrap(l_yaw - cur_yaw)) <= tol_y and abs(l_pitch - cur_pitch) <= tol_p * 1.5
+                        tol_l = (math.atan2(rad * 0.85, max(d, 1.0)) + 0.004) if "laser_tight" in self.flags else tol_y
+                        err = abs(wrap(l_yaw - cur_yaw)) <= tol_l and abs(l_pitch - cur_pitch) <= tol_p * 1.5
                         if laser_ready and err:
                             fire[li] = False  # release -> beam
                         elif charge > full + ls.get("hold_s", 2) - 0.25 and not err:
@@ -900,10 +926,12 @@ class Bot:
 
         if zs["urgent"]:
             mode = "zone"
-        elif (self.retreating or many or outranged) and not close_fight:
+        elif (self.retreating or many or outranged or (hide and not zs["must_go"])) and not close_fight:
             mode = "cover"
         elif zs["must_go"]:
             mode = "zone"
+        elif "patient" in self.flags and t < self.hide_until and not threats and not zs["urgent"]:
+            mode = "hold"  # just broke line of sight: stay put and listen instead of wandering back out
         elif want_cube and hp_frac > 0.35 and (want_cube[0] < 10 or target is None or not target["shoot"]
                                                or target["d"] > 60) and len(real_threats) <= 1:
             mode = "cube"
@@ -962,8 +990,8 @@ class Bot:
             mp = target["m"]["pos"]
             ang = math.atan2(mp[1] - y, mp[0] - x)
             if t > self.strafe_until:
-                self.strafe_sign = -self.strafe_sign if self.rng.random() < 0.7 else self.strafe_sign
-                self.strafe_until = t + 1.0 + self.rng.random() * 1.6
+                self.strafe_sign = -self.strafe_sign if self.rng.random() < (1.0 if "jink" in self.flags else 0.7) else self.strafe_sign
+                self.strafe_until = t + ((0.35 + self.rng.random() * 0.55) if "jink" in self.flags else (1.0 + self.rng.random() * 1.6))
             radial = max(-1.0, min(1.0, (d - pref) / 30.0))
             side = 0.85 * self.strafe_sign
             mvx = math.cos(ang) * radial + math.cos(ang + math.pi / 2) * side
@@ -1039,9 +1067,18 @@ class Bot:
                 boost = boost or (dboost and me["grounded"])
                 self.prev_dir = (move[0], move[1])
 
+        # quiet movement: at or below step_speed (5 m/s) a mech makes no sound at all
+        if "sneak" in self.flags and mode in ("roam", "cube", "hold", "cover") and not boost and dodge is None \
+                and not zs["must_go"] and not zs["urgent"] and t - self.last_dmg_t > 3.0 \
+                and (enemies or (self.last_sound and t - self.last_sound[0] < 8.0)):
+            sc = 4.6 / max(1.0, st.get("walk_speed", 11.7))
+            nm = math.hypot(move[0], move[1])
+            if nm > sc:
+                move = [move[0] / nm * sc, move[1] / nm * sc]
+
         # stuck detection
         hs = math.hypot(me["vel"][0], me["vel"][1])
-        if math.hypot(*move) > 0.5 and hs < 2.5 and me["grounded"]:
+        if math.hypot(*move) > 0.3 and hs < 2.5 and me["grounded"]:
             self.stuck_t += 0.1
         else:
             self.stuck_t = max(0.0, self.stuck_t - 0.05)
