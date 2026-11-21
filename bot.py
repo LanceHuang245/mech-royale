@@ -20,7 +20,7 @@ import mechfight as mf
 TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:110,armgo,armd:100,pickd:240,pickd2:160,"
                                       "prefl:180,prefg:140,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
-                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,hunt,hunthp:0.7").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,hunt,hunthp:0.7,perch,percht:30,perchr:80").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -385,6 +385,8 @@ class Bot:
         self.wig_sign, self.wig_until = 1, 0.0
         self.peek_tick, self.peek_cover, self.peek_from, self.peek_t = -99, None, None, -99.0
         self.last_enemy = None  # (t, (x, y)) of the nearest enemy last seen
+        self.perch, self.perch_until, self.perch_climb = None, 0.0, None
+        self.roofs = self._roofs() if self.world.ok else []
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
@@ -1074,6 +1076,22 @@ class Bot:
         if mode in ("roam", "fight") and goal is None or mode == "roam":
             goal = self._roam_goal(obs, pos, zs, farm, hp_frac, threats)
 
+        # perch: hold a roof inside the safe circle (we see farther; ground mechs close to the building cannot see us)
+        self.perch_climb = None
+        if "perch" in self.flags and not zs["urgent"] and not zs["must_go"] and (has_laser or has_light) \
+                and t > self._k("percht", 30) and mode != "loot":
+            pc = self._perch(pos, zs, t)
+            if pc is not None:
+                on_roof = z > pc[2] - 1.5 and math.dist(pc[:2], pos[:2]) < 12
+                # only head for a roof when no known enemy is within perchr m (climbing in front of one is risky)
+                clear = not any(e["d"] < self._k("perchr", 80) for e in enemies)
+                if on_roof or (clear and mode in ("roam", "cube", "cover", "peekback")):
+                    mode = "perch"
+                    self.mode = mode
+                    goal = pc[:2]
+                    if not on_roof:
+                        self.perch_climb = pc[2]
+
         # keep the goal inside the zone we are heading to
         if goal is not None and mode not in ("zone",) and zs["must_go"]:
             if math.dist(goal, zs["nc"]) > zs["nr"]:
@@ -1110,6 +1128,10 @@ class Bot:
                 self.prev_dir = (dx, dy)
                 # climbing onto roofs for loot
                 if mode == "loot" and gd_final < 14 and want_pick[0]["pos"][2] > z + 1.5 and me["energy"] > 20:
+                    self.climb_until = max(self.climb_until, t + 0.6)
+                # climbing onto the perch roof once there is energy for the whole climb (~0.6 m per energy point)
+                if self.perch_climb is not None and gd_final < 14 and \
+                        me["energy"] > min(95.0, (self.perch_climb - z) * 1.7 + 15):
                     self.climb_until = max(self.climb_until, t + 0.6)
                 # hurry to far loot / cubes when nobody is close (boost drains energy, which regenerates)
                 if mode in ("loot", "cube") and gd_final > 30 and not any(e["d"] < 80 for e in real_threats):
@@ -1275,6 +1297,42 @@ class Bot:
         if dn > max(nr * 0.55, 15):
             return nc
         return None
+
+    def _roofs(self):
+        """Roof points 8-45 m above the ground (climbable with one tank of energy), at least 6 m from any edge."""
+        w = self.world
+        r, nx, ny, top, base = w.RES, w.nx, w.ny, w.top, w.base
+        k = 3
+        offs = (k, -k, k * nx, -k * nx, k + k * nx, k - k * nx, -k + k * nx, -k - k * nx)
+        out = []
+        for j in range(k, ny - k, 2):
+            for i in range(k, nx - k, 2):
+                c = j * nx + i
+                tp = top[c]
+                if tp < -1e8:
+                    continue
+                x, y = w.min_x + (i + 0.5) * r, w.min_y + (j + 0.5) * r
+                if x < w.bx0 + 10 or x > w.bx1 - 10 or y < w.by0 + 10 or y > w.by1 - 10:
+                    continue
+                g = w.ground(x, y)
+                if not (8.0 <= tp - g <= 45.0) or base[c] > g + 1.0:
+                    continue
+                if all(abs(top[c + o] - tp) < 0.5 for o in offs):
+                    out.append((x, y, tp))
+        return out
+
+    def _perch(self, pos, zs, t):
+        """Roof point to hold: keep the current one while it stays safe, else the nearest safe one within 200 m."""
+        p = self.perch
+        if p is not None and t < self.perch_until and self._safe_point(zs, p):
+            return p
+        best, bd = None, 200.0
+        for r in self.roofs:
+            d = math.dist(r[:2], pos[:2])
+            if d < bd and self._safe_point(zs, r):
+                best, bd = r, d
+        self.perch, self.perch_until = best, t + 30.0
+        return best
 
     def _find_cover(self, pos, threats, zs, st):
         if not threats:
