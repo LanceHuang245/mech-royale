@@ -18,7 +18,7 @@ from array import array
 import mechfight as mf
 
 TAU = 2 * math.pi
-FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,hurt:0.55,resume:0.95,armgo,armd:100,prefl:180,prefg:140").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,hurt:0.55,resume:0.95,armgo,armd:100,prefl:180,prefg:140,rim").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -1198,6 +1198,18 @@ class Bot:
             if bc and bc[0] > 20:
                 return bc[1][:2]
         nc, nr = zs["nc"], zs["nr"]
+        # rim: the first seconds, keep away from the middle where idle mechs converge (fewer neighbours at the edge)
+        if "rim" in self.flags and obs["t"] < self._k("rimt", 60) and not zs["must_go"]:
+            c = zs["c"]
+            dx, dy = x - c[0], y - c[1]
+            dd = math.hypot(dx, dy) or 1.0
+            rr = self._k("rimr", 400)
+            if dd < rr:
+                w = self.world
+                tx = min(max(c[0] + dx / dd * rr, w.bx0 + 25), w.bx1 - 25)
+                ty = min(max(c[1] + dy / dd * rr, w.by0 + 25), w.by1 - 25)
+                if math.hypot(tx - x, ty - y) > 25:
+                    return (tx, ty)
         # farm: early on (one hunter at a time) explore the safe circle for crates instead of idling at its centre
         if "farm" in self.flags and obs["t"] < self._k("farmt", 150) and not threats and not zs["must_go"]:
             wp = self.explore_wp
