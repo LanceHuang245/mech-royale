@@ -26,10 +26,12 @@ class _Done(Exception):
 
 
 class Squad(A.League):
-    def __init__(self, cfg, world, seed, ours, kit, late, sight, noise):
+    def __init__(self, cfg, world, seed, ours, kit, late, sight, noise, pref=1.0):
         entries = [("ours", ours)] + [("house", A.make_factory("hunter:%g" % (s * noise), kit)) for s in TIERS]
         self.late, self.sight = late, sight
         super().__init__(cfg, world, seed, entries, econ=True)
+        for b in self.bots[1:]:
+            b.pref_mul = pref
         if "o_arm" in getattr(self.bots[0], "flags", ()):  # oracle: spawn with the target loadout
             self.mechs[0].weapons = [A.S.weapon("laser", cfg), A.S.weapon("lightning", cfg)]
 
@@ -85,6 +87,7 @@ def main():
     ap.add_argument("--bot", choices=["ours", "example"], default="ours")
     ap.add_argument("--late", type=float, default=180.0)
     ap.add_argument("--sight", type=float, default=250.0)
+    ap.add_argument("--pref", type=float, default=0.6, help="house bots' preferred fighting distance multiplier (0.6 fits gunlaser real -0.19)")
     ap.add_argument("--noise", type=float, default=2.5)  # calibrated: example ~0.9, v0.5 ~5.0 (real 1.15 / 4.75)
     args = ap.parse_args()
     cfg = A.load_cfg(args.kit)
@@ -95,7 +98,7 @@ def main():
         if world is None:  # the league shares one World between all instances
             mod = next(iter(A._MODS.values()), None)
             world = mod._shared[0] if mod else A.S.B.World(os.path.join(args.kit, "arena"))
-        sim = Squad(cfg, world, 1 + args.start + k, ours, args.kit, args.late, args.sight, args.noise)
+        sim = Squad(cfg, world, 1 + args.start + k, ours, args.kit, args.late, args.sight, args.noise, args.pref)
         try:
             p = sim.run()[0]["points"]
         except _Done:

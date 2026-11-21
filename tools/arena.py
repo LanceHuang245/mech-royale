@@ -44,6 +44,7 @@ class HunterBot:
         self.strafe = 1
         self.strafe_t = 0.0
         self.heard = None
+        self.pref_mul = 1.0  # scales the preferred fighting distance (tools/practice.py --pref)
 
     def _slide(self, pos, mv):
         w = self.w
@@ -92,7 +93,7 @@ class HunterBot:
                 self.strafe = -self.strafe
                 self.strafe_t = t + 1 + self.rng.random() * 2
             if goal is None:
-                pref = 70 if li is not None else 45
+                pref = (70 if li is not None else 45) * self.pref_mul
                 if d > pref + 15:
                     move = [math.cos(ang), math.sin(ang)]
                 elif d < pref - 20:
