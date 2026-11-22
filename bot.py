@@ -19,9 +19,9 @@ import mechfight as mf
 
 TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:110,armgo,armd:100,pickd:240,pickd2:160,"
-                                      "prefl:180,prefg:140,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
+                                      "prefl:180,prefg:75,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
                                       "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,"
-                                      "nano,cube10,fboost,leadk:0.8,pocket").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "nano,cube10,fboost,leadk:0.8,pocket,lead2,gungate").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -393,6 +393,7 @@ class Bot:
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
+        self.vh = {}             # enemy id -> recent (t, vx, vy, vz) samples
         self.last_kill_t = -99.0
         self.explore_wp, self.explore_until = None, 0.0
         self.mortar_g = cfg["weapons"]["mortar"].get("gravity", 22.0)
@@ -417,6 +418,39 @@ class Bot:
             if w and w["kind"] == kind:
                 return i, w
         return None, None
+
+    def _motion(self, m, t):
+        """(acceleration estimate, airborne) of a visible mech from the last ~0.5 s of its reported velocity."""
+        v = m.get("vel") or [0.0, 0.0, 0.0]
+        air = abs(v[2]) > 1.0
+        h = self.vh.setdefault(m["id"], [])
+        h.append((t, v[0], v[1], v[2]))
+        while len(h) > 1 and t - h[0][0] > 0.6:
+            h.pop(0)
+        old = next((e for e in h if 0.2 <= t - e[0] <= 0.6), None)
+        if old is None:
+            return (0.0, 0.0, 0.0), air
+        dt = t - old[0]
+        ax, ay, az = 0.5 * (v[0] - old[1]) / dt, 0.5 * (v[1] - old[2]) / dt, 0.5 * (v[2] - old[3]) / dt  # damped x0.5
+        lim = 12.0 if air else 58.0  # air_accel vs ground_accel
+        n = math.hypot(ax, ay)
+        if n > lim:
+            ax, ay = ax / n * lim, ay / n * lim
+        return (ax, ay, max(-22.0, min(34.0, az))), air
+
+    def _gun_ok(self, kind, d, ctr, vel, acc, air, has_laser, x, y):
+        """gungate: bullets take d/252 s to arrive, so skip shots at far targets that are strafing or reversing (a laser
+        covers far range); airborne targets turn slowly (air_accel 12) and stay fair game."""
+        if "gungate" not in self.flags or kind != "mech" or air or d < 60:
+            return True
+        if has_laser and d > self._k("gunmax", 110):
+            return False
+        if math.hypot(acc[0], acc[1]) > 25.0:
+            return False
+        dx, dy = ctr[0] - x, ctr[1] - y
+        n = math.hypot(dx, dy) or 1.0
+        lat = abs(vel[0] * -dy / n + vel[1] * dx / n)
+        return not (d > 100 and lat > 6.0)
 
     def _cube_ok(self, me):
         """cube10: past the 10-cube stat cap more cubes only make us bigger, so only chase them when an upgrade is near."""
@@ -755,7 +789,9 @@ class Bot:
                 shoot = vis or self.world.los((x, y, z + muzzle_h), center)
             else:
                 vis = shoot = False
-            enemies.append({"m": m, "d": d, "vis": vis, "shoot": shoot, "center": center, "scale": scale})
+            acc, air = self._motion(m, t)
+            enemies.append({"m": m, "d": d, "vis": vis, "shoot": shoot, "center": center, "scale": scale,
+                            "acc": acc, "air": air})
         threats = [e for e in enemies if e["vis"] and e["d"] < 240]
         if enemies:
             e0 = min(enemies, key=lambda e: e["d"])
@@ -865,11 +901,12 @@ class Bot:
         cur_yaw, cur_pitch = me["aim"]
         shoot_at = None
         if target and target["shoot"]:
-            shoot_at = ("mech", target["center"], target["m"].get("vel", [0, 0, 0]), target["d"], 2.5 * target["scale"])
+            shoot_at = ("mech", target["center"], target["m"].get("vel", [0, 0, 0]), target["d"], 2.5 * target["scale"],
+                        target["acc"], target["air"])
         elif farm:
             d, kind, obj, ctr = farm
             vel = obj.get("vel", [0, 0, 0]) if kind == "npc" else [0, 0, 0]
-            shoot_at = (kind, ctr, vel, d, 1.4 if kind == "crate" else 1.8)
+            shoot_at = (kind, ctr, vel, d, 1.4 if kind == "crate" else 1.8, (0.0, 0.0, 0.0), False)
 
         # hit by someone we cannot see and the current target is not in our face: turn to look
         if rear_hidden and not (target and target["shoot"] and target["d"] < 45):
@@ -880,13 +917,19 @@ class Bot:
                 not (target and target["shoot"] and target["d"] < 40):
             shoot_at = None
         if shoot_at:
-            kind, ctr, vel, d, rad = shoot_at
+            kind, ctr, vel, d, rad, acc, air = shoot_at
             mx, my, mz = x, y, z + muzzle_h
             # gun lead
             gspeed = gw["stats"]["speed"] if gw else 252.0
             px, py, pz = ctr
+            lead2 = "lead2" in self.flags
             for _ in range(2):
                 tt = math.dist((mx, my, mz), (px, py, pz)) / gspeed + 0.05
+                if lead2:  # lead2: constant-acceleration lead (strafe reversals, jet arcs) from the target's velocity history
+                    h = 0.5 * tt * tt
+                    px, py = ctr[0] + vel[0] * tt + acc[0] * h, ctr[1] + vel[1] * tt + acc[1] * h
+                    pz = ctr[2] + max(-8.0, min(8.0, vel[2] * tt + acc[2] * h))
+                    continue
                 lk = self._k("leadk", 1.0)  # lead factor: strafing targets reverse, so full linear lead over-shoots
                 px, py, pz = ctr[0] + vel[0] * tt * lk, ctr[1] + vel[1] * tt * lk, ctr[2] + max(-6.0, min(6.0, vel[2] * tt))
             g_yaw = math.atan2(py - my, px - mx)
@@ -920,7 +963,7 @@ class Bot:
             else:
                 aim_yaw, aim_pitch = g_yaw, g_pitch
 
-            if gw and d < gw["stats"].get("range", 230) - 3:
+            if gw and d < gw["stats"].get("range", 230) - 3 and self._gun_ok(kind, d, ctr, vel, acc, air, bool(lw), x, y):
                 if gw.get("reload", 0) <= 0 and gw.get("ammo", 1) > 0:
                     if abs(wrap(g_yaw - cur_yaw)) <= tol_y and abs(g_pitch - cur_pitch) <= tol_p:
                         fire[gi] = True
