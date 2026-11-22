@@ -21,7 +21,7 @@ TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:110,armgo,armd:100,pickd:240,pickd2:160,"
                                       "prefl:180,prefg:140,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
                                       "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,"
-                                      "nano,cube10,fboost,leadk:0.8,pocket,peek2,zlate,duel,lead2").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "nano,cube10,fboost,leadk:0.8,pocket,peek2,zlate,duel,lead2,hitfb,precharge,cdwin,zapamb,jink,hitflip").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -390,6 +390,11 @@ class Bot:
         self.perch, self.perch_until, self.perch_climb = None, 0.0, None
         self.roofs = self._roofs() if self.world.ok else []
         self.pocket_cur, self.pocket_until = None, 0.0
+        self.arms = (0.6, 1.0, 1.3)  # hitfb: lead-scale candidates, picked by the gun hit rate seen in this match
+        self.arm_i, self.arm_s, self.arm_h, self.arm_n = 1, [0, 0, 0], [0, 0, 0], 0
+        self.gun_ammo_prev, self.last_kind = None, None
+        self.laser_fired = {}   # enemy id -> time of its last laser beam (cooldown window)
+        self.zap_start, self.zap_cool, self.last_flip = None, -99.0, -99.0
         self.tvis_prev, self.tlost_t, self.peek_n, self.last_peek_t, self.exp_start = False, -99.0, 0, -99.0, -99.0
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
@@ -762,8 +767,13 @@ class Bot:
                 self.last_kill_t = t
                 if "restkill" in self.flags and me["hp"] < self._k("restk", 0.8) * me["max_hp"]:
                     self.retreating = True
+            elif e["type"] == "hit" and e.get("weapon") == "gun" and isinstance(e.get("target"), int) and e["target"] < 16:
+                self.arm_h[self.arm_i] += 1
             elif e["type"] in ("took", "take_failed"):
                 self.known_picks.pop(e.get("id"), None)
+        for b in obs.get("beams", []):
+            if b.get("kind") == "laser" and b.get("by") is not None:
+                self.laser_fired[b["by"]] = t - (b.get("age") or 0)
         self.dmg_log = [d for d in self.dmg_log if t - d[0] < 2.5]
         dps_in = sum(d[1] for d in self.dmg_log) / 2.5
         for s in obs["sounds"]:
@@ -817,6 +827,21 @@ class Bot:
         gi, gw = self._wpn(me, "gun")
         zi, zw = self._wpn(me, "lightning")
         has_laser, has_light = li is not None, zi is not None
+        if "hitfb" in self.flags and gw:
+            am = gw.get("ammo")
+            if am is not None and self.gun_ammo_prev is not None and am < self.gun_ammo_prev and self.last_kind == "mech":
+                self.arm_s[self.arm_i] += self.gun_ammo_prev - am
+                self.arm_n += self.gun_ammo_prev - am
+            self.gun_ammo_prev = am
+            if self.arm_n >= 12:  # re-pick: sample every scale for 12 shots, then mostly the best hit rate
+                self.arm_n = 0
+                low = [i for i in range(3) if self.arm_s[i] < 12]
+                if low:
+                    self.arm_i = min(low, key=lambda i: self.arm_s[i])
+                elif self.rng.random() < 0.2:
+                    self.arm_i = self.rng.randrange(3)
+                else:
+                    self.arm_i = max(range(3), key=lambda i: (self.arm_h[i] + 1.0) / (self.arm_s[i] + 4.0))
 
         # ---- pickups we want
         want_pick = None
@@ -932,6 +957,7 @@ class Bot:
         if shoot_at and "quietheal" in self.flags and self.retreating and \
                 not (target and target["shoot"] and target["d"] < 40):
             shoot_at = None
+        self.last_kind = shoot_at[0] if shoot_at else None
         if shoot_at:
             kind, ctr, vel, d, rad, acc, air = shoot_at
             mx, my, mz = x, y, z + muzzle_h
@@ -943,8 +969,9 @@ class Bot:
                 tt = math.dist((mx, my, mz), (px, py, pz)) / gspeed + 0.05
                 if lead2:  # lead2: constant-acceleration lead (strafe reversals, jet arcs) from the target's velocity history
                     h = 0.5 * tt * tt
-                    px, py = ctr[0] + vel[0] * tt + acc[0] * h, ctr[1] + vel[1] * tt + acc[1] * h
-                    pz = ctr[2] + max(-8.0, min(8.0, vel[2] * tt + acc[2] * h))
+                    km = self.arms[self.arm_i] if "hitfb" in self.flags else 1.0
+                    px, py = ctr[0] + (vel[0] * tt + acc[0] * h) * km, ctr[1] + (vel[1] * tt + acc[1] * h) * km
+                    pz = ctr[2] + max(-8.0, min(8.0, (vel[2] * tt + acc[2] * h) * km))
                     continue
                 lk = self._k("leadk", 1.0)  # lead factor: strafing targets reverse, so full linear lead over-shoots
                 px, py, pz = ctr[0] + vel[0] * tt * lk, ctr[1] + vel[1] * tt * lk, ctr[2] + max(-6.0, min(6.0, vel[2] * tt))
@@ -1067,6 +1094,11 @@ class Bot:
                                 fire[mi] = True
             if gw and gw.get("reload", 0) <= 0 and gw.get("ammo", 12) < gw["stats"].get("mag", 12) * 0.6:
                 act["reload"] = True
+            if "precharge" in self.flags and lw and (lw.get("charge", 0) or 0) <= 0 and (lw.get("cooldown", 0) or 0) <= 0.05 \
+                    and enemies and t - self.last_dmg_t > 1.0 and hp_frac > 0.4 and not self.retreating:
+                e0 = min(enemies, key=lambda e: e["d"])
+                if 30 < e0["d"] < 200 and not e0["shoot"]:
+                    fire[li] = True  # start charging behind cover: release the moment it steps into the line
             if lw and (lw.get("charge", 0) or 0) > 0:
                 # keep the charge while someone is tracked (it auto-fires after hold_s anyway)
                 fire[li] = bool(enemies) and (lw.get("charge", 0) or 0) < lw["stats"].get("charge", 0.75) + 1.5
@@ -1111,6 +1143,18 @@ class Bot:
         close_fight = (target is not None and target["shoot"] and target["d"] < self._k("closed", 40) and (has_light or hp_frac > 0.5)) \
             or finishing
 
+        zap_ok = False
+        if "zapamb" in self.flags and has_light and t - self.zap_cool > 8.0 and t - self.last_dmg_t > 1.0 \
+                and any(not e["shoot"] and e["d"] < 70 for e in enemies) and not any(e["shoot"] for e in enemies):
+            if self.zap_start is None:
+                self.zap_start = t
+            if t - self.zap_start < 3.0:
+                zap_ok = True  # lightning needs no aim: wait for the hidden hunter to come round the corner
+            else:
+                self.zap_cool, self.zap_start = t, None
+        else:
+            self.zap_start = None
+
         if zs["urgent"]:
             mode = "zone"
         elif "armgo" in self.flags and want_pick and not (has_laser or has_light) \
@@ -1121,6 +1165,8 @@ class Bot:
             mode = "cover"
         elif zs["must_go"]:
             mode = "zone"
+        elif zap_ok and not self.retreating:
+            mode = "hold"
         elif "patient" in self.flags and t < self.hide_until and not threats and not zs["urgent"]:
             mode = "hold"  # just broke line of sight: stay put and listen instead of wandering back out
         elif want_cube and hp_frac > 0.35 and (want_cube[0] < 10 or target is None or not target["shoot"]
@@ -1215,6 +1261,11 @@ class Bot:
                     pref = 110
                 elif "mortar" in tw and has_laser:
                     pref = 150
+            if "cdwin" in self.flags and t - self.laser_fired.get(target["m"]["id"], -99.0) < 1.5 \
+                    and not target["m"].get("charging") and d < 150:
+                pref = min(pref, 35)  # its laser is on cooldown (1.65 s): push in now
+                if d > 60 and me["energy"] > 40:
+                    boost = True
             if charge:
                 pref = 22
                 boost = d > 45 and me["energy"] > 35
@@ -1225,6 +1276,9 @@ class Bot:
             if t > self.strafe_until:
                 self.strafe_sign = -self.strafe_sign if self.rng.random() < (1.0 if "jink" in self.flags else 0.7) else self.strafe_sign
                 self.strafe_until = t + ((0.35 + self.rng.random() * 0.55) if "jink" in self.flags else (1.0 + self.rng.random() * 1.6))
+            if "hitflip" in self.flags and t - self.last_dmg_t < 0.15 and t - self.last_flip > 0.5:
+                self.strafe_sign, self.last_flip = -self.strafe_sign, t  # got hit: change direction at once
+                self.strafe_until = t + 0.4 + self.rng.random() * 0.6
             radial = max(-1.0, min(1.0, (d - pref) / 30.0))
             side = self._k("strafe", 0.85) * self.strafe_sign
             mvx = math.cos(ang) * radial + math.cos(ang + math.pi / 2) * side
