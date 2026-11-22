@@ -20,7 +20,8 @@ import mechfight as mf
 TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:110,armgo,armd:100,pickd:240,pickd2:160,"
                                       "prefl:180,prefg:140,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
-                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,"
+                                      "nano,cube10,fboost,leadk:0.8,pocket").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -34,6 +35,7 @@ UPGRADE_DMG = [
     "nanites", "capacitor", "reactor", "gyros", "lightning_range", "lightning_chain", "gun_mag", "gun_velocity",
     "sensors", "servos", "jets", "laser_pierce", "mortar_reload", "mortar_velocity", "mortar_splash",
 ]
+_POCKETS = None  # walled-in nooks, computed once per process (flag "pocket")
 SOUND_THREAT = {"gun", "laser", "laser_charge", "lightning", "mortar", "step", "boost", "jet", "reload"}
 
 
@@ -387,12 +389,15 @@ class Bot:
         self.last_enemy = None  # (t, (x, y)) of the nearest enemy last seen
         self.perch, self.perch_until, self.perch_climb = None, 0.0, None
         self.roofs = self._roofs() if self.world.ok else []
+        self.pocket_cur, self.pocket_until = None, 0.0
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
         self.last_kill_t = -99.0
         self.explore_wp, self.explore_until = None, 0.0
         self.mortar_g = cfg["weapons"]["mortar"].get("gravity", 22.0)
+        if "pocket" in self.flags and self.nav:
+            self._build_pockets()  # precompute at start (hello budget), never inside a 50 ms decision
 
     def _late(self, ms):
         """True once this decision has used more than `ms` milliseconds (hard budget is 50)."""
@@ -413,11 +418,21 @@ class Bot:
                 return i, w
         return None, None
 
+    def _cube_ok(self, me):
+        """cube10: past the 10-cube stat cap more cubes only make us bigger, so only chase them when an upgrade is near."""
+        if "cube10" not in self.flags or me.get("cubes", 0) < 10:
+            return True
+        c = me["cubes"]
+        nxt = [t for t in self.cfg["cubes"].get("upgrade_thresholds", []) if t > c]
+        return bool(nxt) and nxt[0] - c <= 2
+
     def _upgrade_pick(self, offer):
         best, best_rank = 0, 1e9
         for i, ch in enumerate(offer["choices"]):
             cid = ch.get("id", "")
             prio = UPGRADE_DMG if "upgdmg" in self.flags else UPGRADE_PRIORITY
+            if "nano" in self.flags:  # repair nanites right after plating/armor: hide-and-heal is our main survival tool
+                prio = ["plating", "armor", "nanites"] + [u for u in prio if u not in ("plating", "armor", "nanites")]
             rank = prio.index(cid) if cid in prio else 50
             if rank < best_rank:
                 best, best_rank = i, rank
@@ -872,7 +887,8 @@ class Bot:
             px, py, pz = ctr
             for _ in range(2):
                 tt = math.dist((mx, my, mz), (px, py, pz)) / gspeed + 0.05
-                px, py, pz = ctr[0] + vel[0] * tt, ctr[1] + vel[1] * tt, ctr[2] + max(-6.0, min(6.0, vel[2] * tt))
+                lk = self._k("leadk", 1.0)  # lead factor: strafing targets reverse, so full linear lead over-shoots
+                px, py, pz = ctr[0] + vel[0] * tt * lk, ctr[1] + vel[1] * tt * lk, ctr[2] + max(-6.0, min(6.0, vel[2] * tt))
             g_yaw = math.atan2(py - my, px - mx)
             g_pitch = math.atan2(pz - mz, math.hypot(px - mx, py - my))
             l_yaw = math.atan2(ctr[1] + vel[1] * 0.1 - my, ctr[0] + vel[0] * 0.1 - mx)
@@ -971,7 +987,7 @@ class Bot:
 
         # ---- cubes in sight (kills drop theirs + 2)
         want_cube = None
-        for c in obs["cubes"]:
+        for c in (obs["cubes"] if self._cube_ok(me) else []):
             d = math.dist(c["pos"][:2], pos[:2])
             if d < self._k("cubed", 70) and abs(c["pos"][2] - z) < 4.0 and self._safe_point(zs, c["pos"]):
                 if want_cube is None or d < want_cube[0]:
@@ -1022,6 +1038,13 @@ class Bot:
             mode = "loot"
         else:
             mode = "roam"
+
+        # pocket: when idle in the late game wait in a walled-in nook, so enemies reach us one at a time
+        if "pocket" in self.flags and mode == "roam" and t > self._k("pockt", 120) and not zs["must_go"] and self.nav:
+            pk = self._pocket(pos, zs, t)
+            if pk is not None:
+                mode = "pocket"
+                goal = pk
 
         self.mode = mode
         if mode == "zone":
@@ -1086,9 +1109,19 @@ class Bot:
                 pref = self._k("prefz", 28)
             if finishing:
                 pref = self._k("prefz", 28) if has_light else 55
+            if "counter" in self.flags:  # weapon triangle: lightning shorts lasers, lasers outrange lightning and cook off mortars
+                tw = target["m"].get("weapons", [])
+                if "laser" in tw and has_light:
+                    pref = self._k("prefz", 28)
+                elif "lightning" in tw and has_laser and not has_light:
+                    pref = 110
+                elif "mortar" in tw and has_laser:
+                    pref = 150
             if charge:
                 pref = 22
                 boost = d > 45 and me["energy"] > 35
+            elif "fboost" in self.flags and t - self.last_dmg_t < 1.0 and me["energy"] > 45 and d > 50:
+                boost = True  # sprint-strafe while a distant shooter has us in its sights (leads are computed for walking speed)
             mp = target["m"]["pos"]
             ang = math.atan2(mp[1] - y, mp[0] - x)
             if t > self.strafe_until:
@@ -1204,7 +1237,7 @@ class Bot:
                 move = [wv[0] * 0.6, wv[1] * 0.6]
 
         # quiet movement: at or below step_speed (5 m/s) a mech makes no sound at all
-        if "sneak" in self.flags and mode in ("roam", "cube", "hold", "cover") and not boost and dodge is None \
+        if "sneak" in self.flags and mode in ("roam", "cube", "hold", "cover", "pocket") and not boost and dodge is None \
                 and not zs["must_go"] and not zs["urgent"] and t - self.last_dmg_t > 3.0 \
                 and (enemies or (self.last_sound and t - self.last_sound[0] < 8.0)):
             sc = 4.6 / max(1.0, st.get("walk_speed", 11.7))
@@ -1255,7 +1288,7 @@ class Bot:
         x, y, z = pos
         # cubes first
         best = None
-        for c in obs["cubes"]:
+        for c in (obs["cubes"] if self._cube_ok(obs["self"]) else []):
             d = math.dist(c["pos"][:2], pos[:2])
             if d < 120 and c["pos"][2] < z + 6 and self._safe_point(zs, c["pos"]):
                 if best is None or d < best[0]:
@@ -1362,6 +1395,42 @@ class Bot:
             if d < bd and self._safe_point(zs, r):
                 best, bd = r, d
         self.perch, self.perch_until = best, t + 30.0
+        return best
+
+    def _build_pockets(self):
+        """Sample nav cells and keep those with at most 5 of 16 open sight directions (done once per process)."""
+        global _POCKETS
+        if _POCKETS is not None:
+            return
+        w, nav, out = self.world, self.nav, []
+        for j in range(2, nav.ny - 2, 3):
+            for i in range(2, nav.nx - 2, 3):
+                c = j * nav.nx + i
+                if not nav.free[c]:
+                    continue
+                x, y = nav.center(c)
+                e = w.ground(x, y) + 8.0
+                n_open = 0
+                for k in range(16):
+                    a = k * TAU / 16
+                    if w.los((x, y, e), (x + math.cos(a) * 45, y + math.sin(a) * 45, e), 3.0):
+                        n_open += 1
+                if n_open <= 5:
+                    out.append((x, y, n_open))
+        _POCKETS = out
+
+    def _pocket(self, pos, zs, t):
+        """Nearest walled-in nook (few open sight directions) inside the safe circle; kept for 30 s."""
+        self._build_pockets()
+        p = self.pocket_cur
+        if p is not None and t < self.pocket_until and self._safe_point(zs, (p[0], p[1], 0.0)):
+            return p
+        best, bs = None, 1e9
+        for (x, y, n_open) in _POCKETS:
+            d = math.dist((x, y), pos[:2])
+            if d < 150 and self._safe_point(zs, (x, y, 0.0)) and d + 8 * n_open < bs:
+                best, bs = (x, y), d + 8 * n_open
+        self.pocket_cur, self.pocket_until = best, t + 30.0
         return best
 
     def _find_cover(self, pos, threats, zs, st):
