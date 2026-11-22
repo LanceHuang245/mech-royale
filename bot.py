@@ -21,7 +21,7 @@ TAU = 2 * math.pi
 FLAGS = set(x for x in os.environ.get("MR_FLAGS", "farm,farmt:150,hurt:0.55,resume:0.95,many:2,dps:110,armgo,armd:100,pickd:240,pickd2:160,"
                                       "prefl:180,prefg:75,prefz:28,closed:40,strafe:0.85,rim,rimt:60,rimr:400,rimfarm,"
                                       "npcrush,npct:120,npchp:0.35,cubed:70,dropd:170,upgdmg,restkill,restk:0.8,ccheck,"
-                                      "nano,cube10,fboost,leadk:0.8,pocket,lead2,gungate").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
+                                      "nano,cube10,fboost,leadk:0.8,pocket,lead2,gungate,ambush2,peek2,mortar,mortar2,zlate,duel").split(",") if x)  # strategy switches (env MR_FLAGS overrides; dev only)
 WANT_KINDS = ("laser", "lightning")
 UPGRADE_PRIORITY = [
     "plating", "armor", "nanites", "laser_damage", "lightning_efficiency", "gun_rate",
@@ -390,6 +390,7 @@ class Bot:
         self.perch, self.perch_until, self.perch_climb = None, 0.0, None
         self.roofs = self._roofs() if self.world.ok else []
         self.pocket_cur, self.pocket_until = None, 0.0
+        self.tvis_prev, self.tlost_t, self.peek_n, self.last_peek_t, self.exp_start = False, -99.0, 0, -99.0, -99.0
         self.known_crates = {}   # id -> pos (seen, maybe out of sight now)
         self.known_picks = {}    # id -> (kind, pos)
         self.dodge_side = {}     # enemy id -> +1/-1 side we sidestep to
@@ -489,7 +490,7 @@ class Bot:
         need = max(0.0, d_next - (nr - margin))
         time_left = ss - t if t < ss else se - t
         urgent = (not obs["self"]["in_zone"]) or d_cur > r - 8
-        must_go = urgent or (need > 0 and need / walk + (24 if "early" in self.flags else 12) > time_left)
+        must_go = urgent or (need > 0 and need / walk + (24 if "early" in self.flags else (self._k("zbuf", 5) if "zlate" in self.flags else 12)) > time_left)
         return {"c": c, "r": r, "nc": nc, "nr": nr, "margin": margin, "must_go": must_go,
                 "urgent": urgent, "need": need, "dps": z.get("dps", 0)}
 
@@ -840,6 +841,9 @@ class Bot:
             p = want_pick[0]
             if None in held:
                 act["take"] = p["id"]
+            elif "mortar2" in self.flags and "mortar" in held and p["kind"] == "lightning" and gi is not None:
+                act["take"] = p["id"]
+                act["drop"] = gi  # mortar (long range) + lightning (close finisher) loadout: the arm gun goes
             elif "mortar" in self.flags and "mortar" in held and p["kind"] != "mortar":
                 act["take"] = p["id"]
                 act["drop"] = held.index("mortar")  # a laser/lightning replaces the stopgap mortar, not the gun
@@ -869,11 +873,23 @@ class Bot:
             if s < best:
                 best, target = s, e
         self.target_id = target["m"]["id"] if target else None
+        # peek2: the first time a target comes out of hiding we only look (pre-aimed), the second exposure fires
+        tvis = bool(target and target["shoot"])
+        if tvis and not self.tvis_prev and t - self.tlost_t > 1.0:
+            self.peek_n = self.peek_n + 1 if t - self.last_peek_t < 10.0 else 1
+            self.last_peek_t = self.exp_start = t
+        if self.tvis_prev and not tvis:
+            self.tlost_t = t
+        self.tvis_prev = tvis
+        peek_hold = "peek2" in self.flags and tvis and self.peek_n == 1 and t - self.exp_start < 1.2 \
+            and target["d"] > 50 and t - self.last_dmg_t > 1.0 and obs["alive"] > 2
         hide = False
         if "patient" in self.flags and target is not None and not self._engage_ok(obs, me, target, t):
             hide = True
             target = None
             self.hide_until = t + 2.0
+        if peek_hold:
+            hide = True  # step back out of sight after the recon look
 
         # secondary targets for cubes (crates / NPCs) when no enemy can be shot
         farm = None
@@ -1019,11 +1035,44 @@ class Bot:
                 self.scan_yaw = wrap(self.scan_yaw + 0.35)
                 aim_yaw = self.scan_yaw
             aim_pitch = 0.0
+            if look is not None and enemies and "peek2" in self.flags and not (rear_hidden or t - self.last_dmg_t < 3):
+                # pre-aim at the tracked (hidden) enemy so the next peek fires without a turn
+                e0 = min(enemies, key=lambda e: e["d"])
+                aim_pitch = math.atan2(e0["center"][2] - (z + muzzle_h), max(e0["d"], 1.0))
+            if "mortar2" in self.flags and enemies:
+                # indirect fire: enemies we cannot see are still tracked at their real position for a few seconds
+                mi, mw = self._wpn(me, "mortar")
+                if mw and (mw.get("cooldown", 0) or 0) <= 0.05 and not (lw and (lw.get("charge", 0) or 0) > 0):
+                    cands = [e for e in enemies if not e["shoot"] and 50 < e["d"] < 200]
+                    if cands:
+                        e0 = min(cands, key=lambda e: e["d"])
+                        ms = mw["stats"]
+                        v, g = ms.get("speed", 72.0), ms.get("gravity", 22.0)
+                        oz = z + st.get("height", 9.0) + 0.5
+                        c0, v0 = e0["center"], e0["m"].get("vel", [0, 0, 0])
+                        tx, ty, tz, theta = c0[0], c0[1], c0[2] - 4.5, None
+                        for _ in range(2):
+                            dh = math.hypot(tx - x, ty - y)
+                            disc = v ** 4 - g * (g * dh * dh + 2 * (tz - oz) * v * v)
+                            if disc < 0 or dh < 1:
+                                theta = None
+                                break
+                            theta = math.atan((v * v - math.sqrt(disc)) / (g * dh))
+                            tof = dh / (v * math.cos(theta))
+                            tx, ty = c0[0] + v0[0] * tof, c0[1] + v0[1] * tof
+                        if theta is not None:
+                            m_yaw = math.atan2(ty - y, tx - x)
+                            aim_yaw, aim_pitch = m_yaw, theta
+                            if abs(wrap(m_yaw - cur_yaw)) < 0.03 and abs(theta - cur_pitch) < 0.02:
+                                fire[mi] = True
             if gw and gw.get("reload", 0) <= 0 and gw.get("ammo", 12) < gw["stats"].get("mag", 12) * 0.6:
                 act["reload"] = True
             if lw and (lw.get("charge", 0) or 0) > 0:
                 # keep the charge while someone is tracked (it auto-fires after hold_s anyway)
                 fire[li] = bool(enemies) and (lw.get("charge", 0) or 0) < lw["stats"].get("charge", 0.75) + 1.5
+
+        if peek_hold:
+            fire = [False, False]  # first exposure of a hidden enemy: look only, fire on the second peek
 
         # ---- incoming fire
         dodge = self._dodge(obs, me, enemies, t, bool(zw) and me["energy"] > 6)
@@ -1038,6 +1087,11 @@ class Bot:
         real_threats = [e for e in threats if not e.get("pseudo")]
         finishing = bool(target and target["shoot"] and target["m"]["hp"] <= 0.3 * target["m"]["max_hp"]
                          and target["d"] < 130 and hp_frac > 0.3 and len(real_threats) <= 2)
+        # duel: both sides are low and nobody else is around: all-in beats running (it would regenerate too)
+        if "duel" in self.flags and not finishing and target and target["shoot"] and len(real_threats) == 1 \
+                and target["m"]["hp"] <= 0.4 * target["m"]["max_hp"] and target["m"]["hp"] <= 1.1 * me["hp"] \
+                and target["d"] < 130 and not hidden:
+            finishing = True
 
         # ---- movement decision
         charge = False
@@ -1083,7 +1137,8 @@ class Bot:
             mode = "roam"
 
         # pocket: when idle in the late game wait in a walled-in nook, so enemies reach us one at a time
-        if "pocket" in self.flags and mode == "roam" and t > self._k("pockt", 120) and not zs["must_go"] and self.nav:
+        if "pocket" in self.flags and mode == "roam" and not zs["must_go"] and (t > self._k("pockt", 120) or (
+                "ambush2" in self.flags and t > self._k("ambt", 90) and (has_laser or has_light or "mortar" in held))) and self.nav:
             pk = self._pocket(pos, zs, t)
             if pk is not None:
                 mode = "pocket"
